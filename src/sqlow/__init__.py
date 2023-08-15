@@ -1,17 +1,73 @@
-from dataclasses import dataclass, fields
-from decimal import Decimal
+"""
+SQLow is a lightweight Python library that simplifies SQLite database operations, 
+specifically tailored for file-like data management. 
+
+If you work with frontend components written in TypeScript or JavaScript, 
+SQLow offers an intuitive way to manage data as if they were files, 
+all while benefiting from the power and efficiency of an SQLite database.
+"""
+
 import functools
+import json
+import re
 import sqlite3
 import types
-import json
 import typing
-import re
+from dataclasses import dataclass, fields
+from decimal import Decimal
 
 
 class PreDefinedClass:
     """PreDefinedClass"""
 
     name: str = None
+
+
+class Value:
+    """Load & Dump Values to SQLite"""
+
+    @staticmethod
+    def load(the_class, db_row):
+        """Load SQLite Row"""
+        dataclass_type = the_class.__daclass__
+        obj_data = dict(db_row) if db_row else None
+        processed_object = {}
+        if not obj_data:
+            return None
+        for field in fields(dataclass_type):
+            field_name = field.name
+            field_value = obj_data.get(field_name)
+
+            if field.type == float:
+                processed_object[field_name] = Decimal(str(field_value))
+            elif field.type in [dict, list]:
+                processed_object[field_name] = (
+                    json.loads(field_value) if field_value else None
+                )
+            else:
+                processed_object[field_name] = field_value
+
+        return processed_object
+
+    @staticmethod
+    def dump(the_class, **kwargs):
+        """Dump SQLite Row"""
+        processed_values = {}
+        for key, value in kwargs.items():
+            field = next(f for f in fields(the_class.__daclass__) if f.name == key)
+            field_type = field.type
+
+            if field_type == float:
+                # Convert float to Decimal
+                processed_values[key] = Decimal(str(value))
+            elif field_type in [dict, list]:
+                # Convert dict or list to JSON string
+                processed_values[key] = json.dumps(value)
+            else:
+                processed_values[key] = value
+            if key == "name":
+                processed_values[key] = slugify(value)
+        return processed_values
 
 
 class SQLowDatabase:
@@ -29,8 +85,10 @@ class SQLowDatabase:
         """
         self.db_name = db_name
         self.table_name = table_class.__objconfig__.table_name
-        self._dataclass_type = table_class
+        self.__daclass__ = table_class
         self._initialize_table()
+        self.cursor = None
+        self.connection = None
 
     def _connect(self):
         """
@@ -48,12 +106,18 @@ class SQLowDatabase:
         self.connection.close()
 
     def execute(self, query, params=None):
+        """
+        execute database command.
+        """
         self._connect()
         response = self.cursor.execute(query, params or ())
         self._close()
         return response
 
     def fetch_one(self, query, params=None):
+        """
+        Get Single Record
+        """
         self._connect()
         self.cursor.execute(query, params or ())
         response = self.cursor.fetchone()
@@ -61,6 +125,9 @@ class SQLowDatabase:
         return response
 
     def fetch_all(self, query, params=None):
+        """
+        List Records
+        """
         self._connect()
         self.cursor.execute(query, params or ())
         response = self.cursor.fetchall()
@@ -68,12 +135,18 @@ class SQLowDatabase:
         return response
 
     def insert(self, **kwargs):
+        """
+        Insert Record.
+        """
         self._connect()
         response = self.cursor.execute(*kwargs_insert(self, **kwargs))
         self._close()
         return response
 
     def update(self, query, params=None):
+        """
+        Update Record.
+        """
         self._connect()
         response = self.cursor.execute(query, params or ())
         self._close()
@@ -92,7 +165,6 @@ class SQLowDatabase:
             self.update(*kwargs_update(self, name, **kwargs))
         else:
             self.insert(**kwargs)
-        return None
 
     def get(self, name: str):
         """
@@ -102,7 +174,7 @@ class SQLowDatabase:
         self.cursor.execute(*kwargs_select(self, name=name))
         row = self.cursor.fetchone()
         self._close()
-        return self._load_value(row)
+        return Value.load(self, row)
 
     def all(self):
         """
@@ -112,7 +184,7 @@ class SQLowDatabase:
         self.cursor.execute(*kwargs_select(self))
         rows = self.cursor.fetchall()
         self._close()
-        return [self._load_value(row) for row in rows]
+        return [Value.load(self, row) for row in rows]
 
     def delete(self, name: str):
         """
@@ -121,7 +193,6 @@ class SQLowDatabase:
         self._connect()
         self.cursor.execute(*kwargs_delete(self, name=name))
         self._close()
-        return None
 
     def delete_all(self):
         """
@@ -130,100 +201,25 @@ class SQLowDatabase:
         self._connect()
         self.cursor.execute(f"DELETE FROM {self.table_name}")
         self._close()
-        return None
 
     def drop(self):
+        """
+        Delete the table in the database if it exist.
+        """
         self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
-        return None
 
     def _initialize_table(self):
         """
-        Initialize the 'Component' table in the database if it doesn't exist.
+        Initialize the table in the database if it doesn't exist.
         """
         self._connect()
-
-        # Create the 'Component' table if it doesn't exist
-        self.cursor.execute(self._create_table_from_dataclass)
+        self.cursor.execute(self._create_table_query)
         self._close()
-        return None
-
-    def _load_value(self, loaded_object):
-        dataclass_type = self._dataclass_type
-        obj_data = dict(loaded_object) if loaded_object else None
-        processed_object = {}
-        if not obj_data:
-            return None
-        for field in fields(dataclass_type):
-            field_name = field.name
-            field_value = obj_data.get(field_name)
-
-            if field.type == float:
-                processed_object[field_name] = Decimal(str(field_value))
-            elif field.type == dict or field.type == list:
-                processed_object[field_name] = (
-                    json.loads(field_value) if field_value else None
-                )
-            else:
-                processed_object[field_name] = field_value
-
-        return processed_object
-
-    def _process_values(self, **kwargs):
-        processed_values = {}
-
-        for key, value in kwargs.items():
-            field = next(f for f in fields(self._dataclass_type) if f.name == key)
-            field_type = field.type
-
-            if field_type == float:
-                # Convert float to Decimal
-                processed_values[key] = Decimal(str(value))
-            elif field_type == dict or field_type == list:
-                # Convert dict or list to JSON string
-                processed_values[key] = json.dumps(value)
-            else:
-                processed_values[key] = value
-            if key == "name":
-                processed_values[key] = slugify(value)
-        return processed_values
 
     @property
-    def _create_table_from_dataclass(self):
-        dataclass_type = self._dataclass_type
-        dataclass_config = dataclass_type.__objconfig__.__dict__
-        table_name = dataclass_config.get("table_name")
-        table_unique = dataclass_config.get("unique", [])
-        table_unique_together = dataclass_config.get("unique_together", [])
-        table_columns = []
-        table_unique.append("name")
-        columns = ["id INTEGER PRIMARY KEY"]
-        for field in fields(dataclass_type):
-            field_type = field.type
-            field_config: str = ""
-            if field_type == str:
-                field_config = f"{field.name} TEXT"
-            elif field_type == int:
-                field_config = f"{field.name} INTEGER"
-            elif field_type == float:
-                field_config = f"{field.name} DECIMAL"
-            elif field_type == bool:
-                field_config = f"{field.name} BOOLEAN"
-            elif field_type == dict or field_type == list:
-                field_config = f"{field.name} JSON"
-            # Other Configs
-            if field.name in table_unique:
-                field_config = f"{field_config} UNIQUE"
-            # Append
-            columns.append(field_config)
-            table_columns.append(field.name)
-
-        # unique_together
-        for items in table_unique_together:
-            columns.append(f"UNIQUE({ ', '.join(items) })")
-
-        # Build
-        columns_str = ", ".join(columns)
-        return f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_str})"
+    def _create_table_query(self):
+        """Create Table Query"""
+        return create_table_from_dataclass(self)
 
 
 def slugify(text):
@@ -243,6 +239,45 @@ def slugify(text):
     return text
 
 
+def create_table_from_dataclass(the_class):
+    """SQL-Query Generator for <Create-Table>"""
+    dataclass_type = the_class.__daclass__
+    dataclass_config = dataclass_type.__objconfig__.__dict__
+    table_name = dataclass_config.get("table_name")
+    table_unique = dataclass_config.get("unique", [])
+    table_unique_together = dataclass_config.get("unique_together", [])
+    table_columns = []
+    table_unique.append("name")
+    columns = ["id INTEGER PRIMARY KEY"]
+    for field in fields(dataclass_type):
+        field_type = field.type
+        field_config: str = ""
+        if field_type == str:
+            field_config = f"{field.name} TEXT"
+        elif field_type == int:
+            field_config = f"{field.name} INTEGER"
+        elif field_type == float:
+            field_config = f"{field.name} DECIMAL"
+        elif field_type == bool:
+            field_config = f"{field.name} BOOLEAN"
+        elif field.type in [dict, list]:
+            field_config = f"{field.name} JSON"
+        # Other Configs
+        if field.name in table_unique:
+            field_config = f"{field_config} UNIQUE"
+        # Append
+        columns.append(field_config)
+        table_columns.append(field.name)
+
+    # unique_together
+    for items in table_unique_together:
+        columns.append(f"UNIQUE({ ', '.join(items) })")
+
+    # Build
+    columns_str = ", ".join(columns)
+    return f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_str})"
+
+
 def kwargs_insert(self, **kwargs):
     """
     Generate the INSERT query and parameters for inserting data into the table.
@@ -254,11 +289,11 @@ def kwargs_insert(self, **kwargs):
     Returns:
         list: A list containing the query and parameters.
     """
-    processed_values = self._process_values(**kwargs)
-    keys = ", ".join(processed_values.keys())
-    values = ", ".join("?" for _ in processed_values.values())
+    data = Value.dump(**kwargs)
+    keys = ", ".join(data.keys())
+    values = ", ".join("?" for _ in data.values())
     query = f"INSERT INTO {self.table_name} ({keys}) VALUES ({values})"
-    return [query, tuple(processed_values.values())]
+    return [query, tuple(data.values())]
 
 
 def kwargs_update(self, name: str, **kwargs):
@@ -273,10 +308,10 @@ def kwargs_update(self, name: str, **kwargs):
     Returns:
         list: A list containing the query and parameters.
     """
-    processed_values = self._process_values(**kwargs)
-    update_columns = ", ".join(f"{column} = ?" for column in processed_values.keys())
+    data = Value.dump(**kwargs)
+    update_columns = ", ".join(f"{column} = ?" for column in data.keys())
     query = f"UPDATE {self.table_name} SET {update_columns} WHERE name = ?"
-    return [query, tuple(processed_values.values()) + (name,)]
+    return [query, tuple(data.values()) + (name,)]
 
 
 def kwargs_delete(self, **kwargs):
@@ -290,10 +325,10 @@ def kwargs_delete(self, **kwargs):
     Returns:
         list: A list containing the query and parameters.
     """
-    processed_values = self._process_values(**kwargs)
-    conditions = " AND ".join(f"{key} = ?" for key in processed_values.keys())
+    data = Value.dump(**kwargs)
+    conditions = " AND ".join(f"{key} = ?" for key in data.keys())
     query = f"DELETE FROM {self.table_name} WHERE {conditions}"
-    return [query, tuple(processed_values.values())]
+    return [query, tuple(data.values())]
 
 
 def kwargs_select(self, **kwargs):
@@ -310,10 +345,10 @@ def kwargs_select(self, **kwargs):
     select_columns_str = "*"
 
     if kwargs:
-        processed_values = self._process_values(**kwargs)
-        conditions = " AND ".join(f"{key} = ?" for key in processed_values.keys())
+        data = Value.dump(**kwargs)
+        conditions = " AND ".join(f"{key} = ?" for key in data.keys())
         query = f"SELECT {select_columns_str} FROM {self.table_name} WHERE {conditions}"
-        params = tuple(processed_values.values())
+        params = tuple(data.values())
     else:
         query = f"SELECT {select_columns_str} FROM {self.table_name}"
         params = ()
@@ -412,12 +447,12 @@ def decorator_config(_class, config: dict):
     Returns:
         None
     """
-    table_name = config.get("table_name", _class.__name__)
+    _config: dict | types.SimpleNamespace = config
+    table_name = _config.get("table_name", _class.__name__.lower())
     _class = dataclass(_class)
-    config["table_name"] = table_name
-    config = types.SimpleNamespace(**config)
-    _class.__objconfig__ = config
-    return None
+    _config["table_name"] = table_name
+    _config = types.SimpleNamespace(**_config)
+    _class.__objconfig__ = _config
 
 
 def sqlow(database: str):
@@ -432,3 +467,10 @@ def sqlow(database: str):
     """
     # ... (Function implementation)
     return sqlow_base_init(database)
+
+
+def create_table(database, table_name, **columns):
+    """Dynamically create the table"""
+    sqlite = sqlow(database)
+    new_class = type(table_name, (), columns)
+    return sqlite(new_class)()
