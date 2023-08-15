@@ -1,6 +1,6 @@
 [project]
 name = "sqlow"
-version = "0.1.0"
+version = "0.1.1"
 description = "SQLow is a lightweight Python library that simplifies SQLite database operations, specifically tailored for file-like data management."
 authors = [
     { name = "hlop3z", email = "23062270+hlop3z@users.noreply.github.com" },
@@ -17,7 +17,6 @@ build-backend = "pdm.backend"
 [tool.pdm.scripts]
 dev = "python scripts/linter.py"
 pre = { shell = "pre-commit run --all-file" }
-pypi = "twine upload dist/*"
 test = { shell = "pytest -rA tests/" }
 
 [tool.pdm.dev-dependencies]
