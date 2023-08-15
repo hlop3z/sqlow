@@ -18,7 +18,7 @@ build-backend = "pdm.backend"
 dev = "python scripts/linter.py"
 pre = { shell = "pre-commit run --all-file" }
 pypi = "twine upload dist/*"
-test = { shell = "python tests/test_one.py" }
+test = { shell = "pytest -rA tests/" }
 
 [tool.pdm.dev-dependencies]
 devops = [
@@ -31,5 +31,5 @@ devops = [
     "mypy>=0.991",
     "ssort>=0.11.6",
     "pre-commit>=2.20.0",
-    "MonkeyType>=23.3.0",
 ]
+testing = ["pytest>=7.4.0"]

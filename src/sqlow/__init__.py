@@ -1,9 +1,9 @@
 """
-SQLow is a lightweight Python library that simplifies SQLite database operations, 
-specifically tailored for file-like data management. 
+SQLow is a lightweight Python library that simplifies SQLite database operations,
+specifically tailored for file-like data management.
 
-If you work with frontend components written in TypeScript or JavaScript, 
-SQLow offers an intuitive way to manage data as if they were files, 
+If you work with frontend components written in TypeScript or JavaScript,
+SQLow offers an intuitive way to manage data as if they were files,
 all while benefiting from the power and efficiency of an SQLite database.
 """
 
@@ -21,6 +21,23 @@ class PreDefinedClass:
     """PreDefinedClass"""
 
     name: str = None  # type: ignore[assignment]
+
+
+def slugify(text):
+    """
+    Convert a string to a slug format.
+
+    Args:
+        text (str): The input text.
+
+    Returns:
+        str: The slugified text.
+    """
+    text = re.sub(r"[^\w\s-]", "", text.lower())
+    text = re.sub(r"[-\s]+", "-", text)
+    text = re.sub(r"^-|-$", "", text)  # Remove leading or trailing "-"
+    text = re.sub(r"--+", "-", text)  # Replace double "--" with single "-"
+    return text
 
 
 class Value:
@@ -68,173 +85,6 @@ class Value:
             if key == "name":
                 processed_values[key] = slugify(value)
         return processed_values
-
-
-class SQLowDatabase:
-    """SQLow Database"""
-
-    def __init__(self, table_class: typing.Any = None, db_name: str = "db.sqlite3"):
-        """
-        Initialize the SQLite Manager.
-
-        Args:
-            table_class (dataclass, optional): The dataclass representing the table structure.
-            db_name (str, optional): The name of the SQLite database file.
-        """
-        self.db_name = db_name
-        self.table_name = table_class.__objconfig__.table_name
-        self.__daclass__ = table_class
-        self._initialize_table()
-        self.cursor = types.SimpleNamespace()
-        self.connection = None
-
-    def _connect(self):
-        """
-        Connect to the SQLite database and create a cursor.
-        """
-        self.connection = sqlite3.connect(self.db_name)
-        self.connection.row_factory = sqlite3.Row
-        self.cursor = self.connection.cursor()
-
-    def _close(self):
-        """
-        Commit changes and close the database connection.
-        """
-        self.connection.commit()
-        self.connection.close()
-
-    def execute(self, query, params=None):
-        """
-        execute database command.
-        """
-        self._connect()
-        response = self.cursor.execute(query, params or ())
-        self._close()
-        return response
-
-    def fetch_one(self, query, params=None):
-        """
-        Get Single Record
-        """
-        self._connect()
-        self.cursor.execute(query, params or ())
-        response = self.cursor.fetchone()
-        self._close()
-        return response
-
-    def fetch_all(self, query, params=None):
-        """
-        List Records
-        """
-        self._connect()
-        self.cursor.execute(query, params or ())
-        response = self.cursor.fetchall()
-        self._close()
-        return response
-
-    def insert(self, **kwargs):
-        """
-        Insert Record.
-        """
-        self._connect()
-        response = self.cursor.execute(*kwargs_insert(self, **kwargs))
-        self._close()
-        return response
-
-    def update(self, query, params=None):
-        """
-        Update Record.
-        """
-        self._connect()
-        response = self.cursor.execute(query, params or ())
-        self._close()
-        return response
-
-    def set(self, **kwargs):
-        """
-        {Add | Update} <Row> in the Database.
-        """
-        name = kwargs.get("name")
-        row = None
-        if name:
-            row = self.get(name=name)
-        if row:
-            del kwargs["name"]
-            self.update(*kwargs_update(self, name, **kwargs))
-        else:
-            self.insert(**kwargs)
-
-    def get(self, name: str):
-        """
-        {Get} <Row> in the Database.
-        """
-        self._connect()
-        self.cursor.execute(*kwargs_select(self, name=name))
-        row = self.cursor.fetchone()
-        self._close()
-        return Value.load(self, row)
-
-    def all(self):
-        """
-        {Get-All} <Rows> in the Database.
-        """
-        self._connect()
-        self.cursor.execute(*kwargs_select(self))
-        rows = self.cursor.fetchall()
-        self._close()
-        return [Value.load(self, row) for row in rows]
-
-    def delete(self, name: str):
-        """
-        {Delete} <Row> in the Database.
-        """
-        self._connect()
-        self.cursor.execute(*kwargs_delete(self, name=name))
-        self._close()
-
-    def delete_all(self):
-        """
-        {Delete-All} <Rows> in the Database.
-        """
-        self._connect()
-        self.cursor.execute(f"DELETE FROM {self.table_name}")
-        self._close()
-
-    def drop(self):
-        """
-        Delete the table in the database if it exist.
-        """
-        self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
-
-    def _initialize_table(self):
-        """
-        Initialize the table in the database if it doesn't exist.
-        """
-        self._connect()
-        self.cursor.execute(self._create_table_query)
-        self._close()
-
-    @property
-    def _create_table_query(self):
-        """Create Table Query"""
-        return create_table_from_dataclass(self)
-
-
-def slugify(text):
-    """
-    Convert a string to a slug format.
-
-    Args:
-        text (str): The input text.
-
-    Returns:
-        str: The slugified text.
-    """
-    text = re.sub(r"[^\w\s-]", "", text.lower())
-    text = re.sub(r"[-\s]+", "-", text)
-    text = re.sub(r"^-|-$", "", text)  # Remove leading or trailing "-"
-    text = re.sub(r"--+", "-", text)  # Replace double "--" with single "-"
-    return text
 
 
 def create_table_from_dataclass(the_class):
@@ -354,6 +204,156 @@ def kwargs_select(self, **kwargs):
     return [query, params]
 
 
+class SQLowDatabase:
+    """SQLow Database"""
+
+    def _connect(self):
+        """
+        Connect to the SQLite database and create a cursor.
+        """
+        self.connection = sqlite3.connect(self.db_name)
+        self.connection.row_factory = sqlite3.Row
+        self.cursor = self.connection.cursor()
+
+    def _close(self):
+        """
+        Commit changes and close the database connection.
+        """
+        self.connection.commit()
+        self.connection.close()
+
+    @property
+    def _create_table_query(self):
+        """Create Table Query"""
+        return create_table_from_dataclass(self)
+
+    def _initialize_table(self):
+        """
+        Initialize the table in the database if it doesn't exist.
+        """
+        self._connect()
+        self.cursor.execute(self._create_table_query)
+        self._close()
+
+    def __init__(self, table_class: typing.Any = None, db_name: str = "db.sqlite3"):
+        """
+        Initialize the SQLite Manager.
+
+        Args:
+            table_class (dataclass, optional): The dataclass representing the table structure.
+            db_name (str, optional): The name of the SQLite database file.
+        """
+        self.db_name = db_name
+        self.table_name = table_class.__objconfig__.table_name
+        self.__daclass__ = table_class
+        self._initialize_table()
+        self.cursor = types.SimpleNamespace()
+        self.connection = None
+
+    def execute(self, query, params=None):
+        """
+        execute database command.
+        """
+        self._connect()
+        response = self.cursor.execute(query, params or ())
+        self._close()
+        return response
+
+    def fetch_one(self, query, params=None):
+        """
+        Get Single Record
+        """
+        self._connect()
+        self.cursor.execute(query, params or ())
+        response = self.cursor.fetchone()
+        self._close()
+        return response
+
+    def fetch_all(self, query, params=None):
+        """
+        List Records
+        """
+        self._connect()
+        self.cursor.execute(query, params or ())
+        response = self.cursor.fetchall()
+        self._close()
+        return response
+
+    def insert(self, **kwargs):
+        """
+        Insert Record.
+        """
+        self._connect()
+        response = self.cursor.execute(*kwargs_insert(self, **kwargs))
+        self._close()
+        return response
+
+    def update(self, name, **kwargs):
+        """
+        Update Record.
+        """
+        self._connect()
+        response = self.cursor.execute(*kwargs_update(self, name, **kwargs))
+        self._close()
+        return response
+
+    def set(self, **kwargs):
+        """
+        {Add | Update} <Row> in the Database.
+        """
+        name = kwargs.get("name")
+        row = None
+        if name:
+            row = self.get(name=name)
+        if row:
+            del kwargs["name"]
+            self.update(name, **kwargs)
+        else:
+            self.insert(**kwargs)
+
+    def get(self, name: str):
+        """
+        {Get} <Row> in the Database.
+        """
+        self._connect()
+        self.cursor.execute(*kwargs_select(self, name=name))
+        row = self.cursor.fetchone()
+        self._close()
+        return Value.load(self, row)
+
+    def all(self):
+        """
+        {Get-All} <Rows> in the Database.
+        """
+        self._connect()
+        self.cursor.execute(*kwargs_select(self))
+        rows = self.cursor.fetchall()
+        self._close()
+        return [Value.load(self, row) for row in rows]
+
+    def delete(self, name: str):
+        """
+        {Delete} <Row> in the Database.
+        """
+        self._connect()
+        self.cursor.execute(*kwargs_delete(self, name=name))
+        self._close()
+
+    def delete_all(self):
+        """
+        {Delete-All} <Rows> in the Database.
+        """
+        self._connect()
+        self.cursor.execute(f"DELETE FROM {self.table_name}")
+        self._close()
+
+    def drop(self):
+        """
+        Delete the table in the database if it exist.
+        """
+        self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
+
+
 def class_schema_kwargs(cls, **kwargs):
     """
     Generate a dictionary of class schema arguments.
@@ -370,35 +370,23 @@ def class_schema_kwargs(cls, **kwargs):
     return data
 
 
-def sqlow_base_init(database: str):
+def decorator_config(_class, config: dict):
     """
-    Initialize the SQLow database decorator.
+    Configure the decorator for the data class.
 
     Args:
-        database (str): The name of the database.
+        _class: The data class.
+        config (dict): Configuration settings.
 
     Returns:
-        function: The SQLow database decorator.
+        None
     """
-
-    def sqlow_database(_class=None, **params):
-        """Decorator with (Optional-Arguments)."""
-
-        # Optional Arguments
-        if _class is None:
-            return functools.partial(sqlow_database, **params)
-
-        # The Wrapper
-        @functools.wraps(_class)
-        def the_wrapper(*args, **kwargs):
-            cls = merge_data_classes(database, _class, [PreDefinedClass], **params)
-            data = class_schema_kwargs(cls, **kwargs)
-            return cls(*args, **data).db
-
-        # Return @Decorator
-        return the_wrapper
-
-    return sqlow_database
+    _config: dict | types.SimpleNamespace = config
+    table_name = _config.get("table_name", _class.__name__.lower())
+    _class = dataclass(_class)
+    _config["table_name"] = table_name
+    _config = types.SimpleNamespace(**_config)
+    _class.__objconfig__ = _config
 
 
 def merge_data_classes(database, new_class, class_list, **config):
@@ -434,41 +422,39 @@ def merge_data_classes(database, new_class, class_list, **config):
     return _class
 
 
-def decorator_config(_class, config: dict):
-    """
-    Configure the decorator for the data class.
-
-    Args:
-        _class: The data class.
-        config (dict): Configuration settings.
-
-    Returns:
-        None
-    """
-    _config: dict | types.SimpleNamespace = config
-    table_name = _config.get("table_name", _class.__name__.lower())
-    _class = dataclass(_class)
-    _config["table_name"] = table_name
-    _config = types.SimpleNamespace(**_config)
-    _class.__objconfig__ = _config
-
-
 def sqlow(database: str):
     """
-    Initialize the SQLow decorator.
+    Initialize the SQLow database decorator.
 
     Args:
         database (str): The name of the database.
 
     Returns:
-        function: The SQLow decorator.
+        function: The SQLow database decorator.
     """
-    # ... (Function implementation)
-    return sqlow_base_init(database)
+
+    def sqlow_database(_class=None, **params):
+        """Decorator with (Optional-Arguments)."""
+
+        # Optional Arguments
+        if _class is None:
+            return functools.partial(sqlow_database, **params)
+
+        # The Wrapper
+        @functools.wraps(_class)
+        def the_wrapper(*args, **kwargs):
+            cls = merge_data_classes(database, _class, [PreDefinedClass], **params)
+            data = class_schema_kwargs(cls, **kwargs)
+            return cls(*args, **data).db
+
+        # Return @Decorator
+        return the_wrapper
+
+    return sqlow_database
 
 
 def create_table(database, table_name, **columns):
     """Dynamically create the table"""
     sqlite = sqlow(database)
-    new_class = type(table_name, (), columns)
+    new_class = type(table_name, (), {**columns, "__annotations__": columns})
     return sqlite(new_class)()

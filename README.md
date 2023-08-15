@@ -85,3 +85,18 @@ table.delete_all()
 # Drop the entire table
 table.drop()
 ```
+
+## Usage of **`create_table`**
+
+```python
+from sqlow import create_table
+
+fields = {
+    "project_id": int,
+    "docs": str,
+    "meta": dict,
+    "info": list,
+}
+
+table = create_table("db.sqlite3", "Components", **fields)
+```
