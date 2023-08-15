@@ -2,14 +2,6 @@
 
 SQLow is a lightweight Python library that simplifies SQLite database operations, specifically tailored for **file-like data management**. If you work with frontend components written in TypeScript or JavaScript, SQLow offers an intuitive way to manage data as if they were files, all while benefiting from the power and efficiency of an SQLite database.
 
-## Purpose
-
-The main purpose of SQLow is to provide a convenient way to manage file-like data through a database. It's particularly useful for scenarios like managing frontend components, where each component can be treated as a file-like entity within the database.
-
-## Note
-
-In SQLow, all tables include `id` and `name` columns. The `name` column serves as the selector, replacing the traditional `id`. This design choice aligns with the file-like nature of the data and simplifies operations.
-
 ## Key Features
 
 - **Simplified Database Operations:** SQLow streamlines database interactions using **data classes** and **decorators**, abstracting away the complexity of SQL queries.
@@ -38,6 +30,10 @@ pip install sqlow
 - **`delete_all()`**: **Deletes all rows** from the database.
 
 - **`drop()`**: **Drops the entire table** from the database.
+
+## Note
+
+In SQLow, all tables include `id` and `name` columns. **The `name` column serves as the selector, replacing the traditional `id`**. This design choice aligns with the file-like nature of the data and simplifies operations.
 
 ## Usage Example
 
