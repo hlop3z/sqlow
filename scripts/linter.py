@@ -52,13 +52,12 @@ class Handler(watchdog.events.PatternMatchingEventHandler):
         print(f"""Fixing... { path_to_watch }""")
         py_cmd = lambda cmd: f'''python -m {cmd} "{ path_to_watch }"'''
 
-        # Linters
+        # Fixing & Rating
         shell_cmd("isort", py_cmd("isort --profile black"))
         shell_cmd("black", py_cmd("black"))
         shell_cmd("pylint", py_cmd("pylint"), check=False)
 
         # Typing
-        shell_cmd("monkeytype", py_cmd("monkeytype apply"), check=False)
         shell_cmd("mypy", py_cmd("mypy"), check=False)
 
 

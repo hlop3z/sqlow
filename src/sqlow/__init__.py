@@ -20,14 +20,14 @@ from decimal import Decimal
 class PreDefinedClass:
     """PreDefinedClass"""
 
-    name: str = None
+    name: str = None  # type: ignore[assignment]
 
 
 class Value:
     """Load & Dump Values to SQLite"""
 
     @staticmethod
-    def load(the_class, db_row):
+    def load(the_class, db_row) -> dict | None:
         """Load SQLite Row"""
         dataclass_type = the_class.__daclass__
         obj_data = dict(db_row) if db_row else None
@@ -36,7 +36,7 @@ class Value:
             return None
         for field in fields(dataclass_type):
             field_name = field.name
-            field_value = obj_data.get(field_name)
+            field_value: typing.Any = obj_data.get(field_name)
 
             if field.type == float:
                 processed_object[field_name] = Decimal(str(field_value))
@@ -50,9 +50,9 @@ class Value:
         return processed_object
 
     @staticmethod
-    def dump(the_class, **kwargs):
+    def dump(the_class, **kwargs) -> dict:
         """Dump SQLite Row"""
-        processed_values = {}
+        processed_values: typing.Any = {}
         for key, value in kwargs.items():
             field = next(f for f in fields(the_class.__daclass__) if f.name == key)
             field_type = field.type
@@ -73,9 +73,7 @@ class Value:
 class SQLowDatabase:
     """SQLow Database"""
 
-    def __init__(
-        self, table_class: dataclass = typing.Any, db_name: str = "db.sqlite3"
-    ):
+    def __init__(self, table_class: typing.Any = None, db_name: str = "db.sqlite3"):
         """
         Initialize the SQLite Manager.
 
@@ -87,7 +85,7 @@ class SQLowDatabase:
         self.table_name = table_class.__objconfig__.table_name
         self.__daclass__ = table_class
         self._initialize_table()
-        self.cursor = None
+        self.cursor = types.SimpleNamespace()
         self.connection = None
 
     def _connect(self):
