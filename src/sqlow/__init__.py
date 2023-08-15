@@ -56,7 +56,7 @@ class Value:
         for key, value in kwargs.items():
             field = next(f for f in fields(the_class.__daclass__) if f.name == key)
             field_type = field.type
-
+            # Process Value
             if field_type == float:
                 # Convert float to Decimal
                 processed_values[key] = Decimal(str(value))
@@ -287,7 +287,7 @@ def kwargs_insert(self, **kwargs):
     Returns:
         list: A list containing the query and parameters.
     """
-    data = Value.dump(**kwargs)
+    data = Value.dump(self, **kwargs)
     keys = ", ".join(data.keys())
     values = ", ".join("?" for _ in data.values())
     query = f"INSERT INTO {self.table_name} ({keys}) VALUES ({values})"
@@ -306,7 +306,7 @@ def kwargs_update(self, name: str, **kwargs):
     Returns:
         list: A list containing the query and parameters.
     """
-    data = Value.dump(**kwargs)
+    data = Value.dump(self, **kwargs)
     update_columns = ", ".join(f"{column} = ?" for column in data.keys())
     query = f"UPDATE {self.table_name} SET {update_columns} WHERE name = ?"
     return [query, tuple(data.values()) + (name,)]
@@ -323,7 +323,7 @@ def kwargs_delete(self, **kwargs):
     Returns:
         list: A list containing the query and parameters.
     """
-    data = Value.dump(**kwargs)
+    data = Value.dump(self, **kwargs)
     conditions = " AND ".join(f"{key} = ?" for key in data.keys())
     query = f"DELETE FROM {self.table_name} WHERE {conditions}"
     return [query, tuple(data.values())]
@@ -343,7 +343,7 @@ def kwargs_select(self, **kwargs):
     select_columns_str = "*"
 
     if kwargs:
-        data = Value.dump(**kwargs)
+        data = Value.dump(self, **kwargs)
         conditions = " AND ".join(f"{key} = ?" for key in data.keys())
         query = f"SELECT {select_columns_str} FROM {self.table_name} WHERE {conditions}"
         params = tuple(data.values())
