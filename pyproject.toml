@@ -16,3 +16,5 @@ build-backend = "pdm.backend"
 
 [tool.pdm.scripts]
 test = { shell = "python tests/test_one.py" }
+# PyPi Upload
+pypi = "twine upload dist/*"
