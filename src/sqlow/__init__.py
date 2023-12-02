@@ -307,7 +307,8 @@ class SQLowDatabase:
             row = self.get(name=name)
         if row:
             del kwargs["name"]
-            self.update(name, **kwargs)
+            if len(kwargs) > 0:
+                self.update(name, **kwargs)
         else:
             self.insert(**kwargs)
 
