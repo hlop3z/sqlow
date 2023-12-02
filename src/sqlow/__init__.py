@@ -353,6 +353,16 @@ class SQLowDatabase:
         """
         self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
 
+    def rename(self, name: str, update: str):
+        """
+        {Rename} <Row> in the Database.
+        """
+        current = self.get(name)
+        if current:
+            del current["name"]
+            self.set(**current, name=update)
+            self.delete(name)
+
 
 def class_schema_kwargs(cls, **kwargs):
     """

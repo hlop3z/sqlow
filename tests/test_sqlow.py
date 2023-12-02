@@ -47,6 +47,22 @@ def test_insert_and_get():
     assert item["docs"] == "Component documentation"
     # Add more assertions for other fields
 
+def test_rename():
+    # Create an instance of the table
+    table = Components()
+
+    # Insert data into the table
+    table.rename("button", "alert")
+
+    # Retrieve a single record by name
+    button = table.get(name="button")
+    item = table.get(name="alert")
+    assert button == None
+    assert item["name"] == "alert"
+    assert item["project_id"] == 1
+    assert item["docs"] == "Component documentation"
+    # Add more assertions for other fields
+
 
 def test_all():
     # Create an instance of the table
@@ -73,7 +89,7 @@ def test_delete():
 
     # Retrieve all records from the table
     all_items = table.all()
-    assert len(all_items) == 1
+    assert len(all_items) == 2
 
 
 def test_delete_all():
@@ -85,7 +101,7 @@ def test_delete_all():
 
     # Retrieve all records from the table
     all_items = table.all()
-    assert len(all_items) == 2
+    assert len(all_items) == 3
 
     # Delete All
     table.delete_all()
