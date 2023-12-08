@@ -20,6 +20,7 @@ from decimal import Decimal
 class PreDefinedClass:
     """PreDefinedClass"""
 
+    id: int = None  # type: ignore[assignment]
     name: str = None  # type: ignore[assignment]
 
 
@@ -63,7 +64,6 @@ class Value:
                 )
             else:
                 processed_object[field_name] = field_value
-
         return processed_object
 
     @staticmethod
@@ -114,7 +114,8 @@ def create_table_from_dataclass(the_class):
         if field.name in table_unique:
             field_config = f"{field_config} UNIQUE"
         # Append
-        columns.append(field_config)
+        if field.name != "id":
+            columns.append(field_config)
         table_columns.append(field.name)
 
     # unique_together
@@ -144,13 +145,13 @@ def kwargs_insert(self, **kwargs):
     return [query, tuple(data.values())]
 
 
-def kwargs_update(self, name: str, **kwargs):
+def kwargs_update(self, item_id: str, **kwargs):
     """
     Generate the UPDATE query and parameters for updating data in the table.
 
     Args:
         self: The SQLowDatabase instance.
-        name (str): The name of the row to be updated.
+        item_id (int): The name of the row to be updated.
         **kwargs: Key-value pairs representing the data to be updated.
 
     Returns:
@@ -158,8 +159,8 @@ def kwargs_update(self, name: str, **kwargs):
     """
     data = Value.dump(self, **kwargs)
     update_columns = ", ".join(f"{column} = ?" for column in data.keys())
-    query = f"UPDATE {self.table_name} SET {update_columns} WHERE name = ?"
-    return [query, tuple(data.values()) + (name,)]
+    query = f"UPDATE {self.table_name} SET {update_columns} WHERE id = ?"
+    return [query, tuple(data.values()) + (item_id,)]
 
 
 def kwargs_delete(self, **kwargs):
@@ -255,7 +256,11 @@ class SQLowDatabase:
         execute database command.
         """
         self._connect()
-        response = self.cursor.execute(query, params or ())
+        response = None
+        try:
+            response = self.cursor.execute(query, params or ())
+        except:
+            response = False
         self._close()
         return response
 
@@ -283,41 +288,26 @@ class SQLowDatabase:
         """
         Insert Record.
         """
-        self._connect()
-        response = self.cursor.execute(*kwargs_insert(self, **kwargs))
-        self._close()
-        return response
+        return self.execute(*kwargs_insert(self, **kwargs))
 
-    def update(self, name, **kwargs):
+    def update(self, item_id, **kwargs):
         """
         Update Record.
         """
-        self._connect()
-        response = self.cursor.execute(*kwargs_update(self, name, **kwargs))
-        self._close()
-        return response
+        return self.execute(*kwargs_update(self, item_id, **kwargs))
 
-    def set(self, **kwargs):
-        """
-        {Add | Update} <Row> in the Database.
-        """
-        name = kwargs.get("name")
-        row = None
-        if name:
-            row = self.get(name=name)
-        if row:
-            del kwargs["name"]
-            if len(kwargs) > 0:
-                self.update(name, **kwargs)
-        else:
-            self.insert(**kwargs)
-
-    def get(self, name: str):
+    def get(self, item_id: str):
         """
         {Get} <Row> in the Database.
         """
+        return self.get_by(id=item_id)
+
+    def get_by(self, **kwargs):
+        """
+        {Get-By} <Row> in the Database.
+        """
         self._connect()
-        self.cursor.execute(*kwargs_select(self, name=name))
+        self.cursor.execute(*kwargs_select(self, **kwargs))
         row = self.cursor.fetchone()
         self._close()
         return Value.load(self, row)
@@ -332,37 +322,49 @@ class SQLowDatabase:
         self._close()
         return [Value.load(self, row) for row in rows]
 
-    def delete(self, name: str):
+    def delete(self, **kwargs):
         """
         {Delete} <Row> in the Database.
         """
-        self._connect()
-        self.cursor.execute(*kwargs_delete(self, name=name))
-        self._close()
+        return self.execute(*kwargs_delete(self, **kwargs))
 
     def delete_all(self):
         """
         {Delete-All} <Rows> in the Database.
         """
-        self._connect()
-        self.cursor.execute(f"DELETE FROM {self.table_name}")
-        self._close()
+        return self.execute(f"DELETE FROM {self.table_name}")
 
     def drop(self):
         """
         Delete the table in the database if it exist.
         """
-        self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
+        return self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
 
-    def rename(self, name: str, update: str):
+    def set(self, **kwargs):
+        """
+        {Add | Update} <Row> in the Database.
+        """
+        item_id = kwargs.get("id")
+        row = None
+        if item_id:
+            row = self.get(item_id)
+        if row:
+            del kwargs["id"]
+            if len(kwargs) > 0:
+                self.update(item_id, **kwargs)
+        else:
+            self.insert(**kwargs)
+
+    def rename(self, old_name: str, new_name: str):
         """
         {Rename} <Row> in the Database.
         """
-        current = self.get(name)
+        current = self.get_by(name=old_name)
         if current:
-            del current["name"]
-            self.set(**current, name=update)
-            self.delete(name)
+            current["name"] = new_name
+            item_id = current["id"]
+            del current["id"]
+            self.update(item_id, **current)
 
 
 def class_schema_kwargs(cls, **kwargs):
