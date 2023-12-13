@@ -58,6 +58,8 @@ class Value:
 
             if field.type == float:
                 processed_object[field_name] = Decimal(str(field_value))
+            elif field.type == bool:
+                processed_object[field_name] = True if field_value == 1 else False
             elif field.type in [dict, list]:
                 processed_object[field_name] = (
                     json.loads(field_value) if field_value else None

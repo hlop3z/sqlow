@@ -33,7 +33,7 @@ pip install sqlow
 
 ## Note
 
-In SQLow, all tables include `id` and `name` columns. **The `name` column serves as the selector, replacing the traditional `id`**. This design choice aligns with the file-like nature of the data and simplifies operations.
+In SQLow, all tables include `id` and `name` columns. This design choice aligns with the file-like nature of the data and simplifies operations.
 
 ## Usage Example
 
@@ -66,15 +66,19 @@ table.set(
 )
 
 # Retrieve a single record by name
-item = table.get(name="button")
+item = table.get_by(name="button")
 print("Retrieved Item:", item)
 
 # Retrieve all records from the table
 all_items = table.all()
 print("All Items:", all_items)
 
+# Retrieve a single record by name
+item_to_update = table.get_by(name="button")
+
 # Update an existing record by name
-table.set(name="button", docs="Updated documentation")
+item_to_update["meta"] = {"new-meta": "planeta"}
+table.set(**item_to_update)
 
 # Delete a record by name
 table.delete(name="button")

@@ -10,6 +10,7 @@ sqlite = sqlow("db.sqlite3")
 @sqlite
 class Components:
     project_id: int
+    is_good: bool
     docs: str
     meta: dict
     info: list
@@ -17,6 +18,7 @@ class Components:
 
 fake_data = dict(
     name="button",
+    is_good=True,
     project_id=1,
     docs="Component documentation",
     meta={"author": "John Doe"},
@@ -43,8 +45,9 @@ def test_insert_and_get():
 
     # Retrieve a single record by name
     item = table.get_by(name="button")
-    assert item["name"] == "button"
     assert item["project_id"] == 1
+    assert item["is_good"] == True
+    assert item["name"] == "button"
     assert item["docs"] == "Component documentation"
     # Add more assertions for other fields
 

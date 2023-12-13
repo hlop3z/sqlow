@@ -5,6 +5,7 @@ import pytest
 # Define a table <Fields>
 fields = {
     "project_id": int,
+    "is_good": bool,
     "docs": str,
     "meta": dict,
     "info": list,
@@ -17,6 +18,7 @@ Components = lambda: create_table("db.sqlite3", "Components", **fields)
 
 fake_data = dict(
     name="button",
+    is_good=True,
     project_id=1,
     docs="Component documentation",
     meta={"author": "John Doe"},
@@ -34,7 +36,7 @@ def after_tests():
     table.drop()
 
 
-def test_insert_and_get():
+def test_set_insert_and_get():
     # Create an instance of the table
     table = Components()
 
@@ -43,19 +45,20 @@ def test_insert_and_get():
 
     # Retrieve a single record by name
     item = table.get_by(name="button")
-    assert item["name"] == "button"
     assert item["project_id"] == 1
+    assert item["is_good"] == True
+    assert item["name"] == "button"
     assert item["docs"] == "Component documentation"
     # Add more assertions for other fields
 
 
-def test_set_and_get():
+def test_set_update_and_get():
     # Create an instance of the table
     table = Components()
 
     # Retrieve a single record by name
     item = table.get_by(name="button")
-    # Insert data into the table
+    # Update data into the table
     item["meta"] = {"new-meta": "planeta"}
     table.set(**item)
 
