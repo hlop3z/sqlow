@@ -1,6 +1,6 @@
 # **SQLow**: **`DataClass`** SQLite Database Management for **File-like** Operations
 
-SQLow is a lightweight Python library that simplifies SQLite database operations, specifically tailored for **file-like data management**. If you work with frontend components written in TypeScript or JavaScript, SQLow offers an intuitive way to manage data as if they were files, all while benefiting from the power and efficiency of an SQLite database.
+SQLow is a lightweight Python library that simplifies SQLite database operations, specifically tailored for **file-like data management**. For example, if you work with frontend components written in TypeScript or JavaScript, SQLow offers an intuitive way to manage data as if they were files, all while benefiting from the power and efficiency of an SQLite database.
 
 ## Key Features
 
@@ -17,19 +17,19 @@ You can install **`SQLow`** using the following command:
 pip install sqlow
 ```
 
-## Method Descriptions
+## Methods
 
-- **`set(kwargs)`**: **Inserts** or **Updates** a row in the database. If a row with the given name exists, it updates the row.
-
-- **`get(name: str)`**: **Retrieves a single row** from the database by its name.
-
-- **`all()`**: **Retrieves all rows** from the database and returns them as a list of dictionaries.
-
-- **`delete(name: str)`**: **Deletes a single row** from the database by its name.
-
-- **`delete_all()`**: **Deletes all rows** from the database.
-
-- **`drop()`**: **Drops the entire table** from the database.
+| Method             | Description                                                                                                |
+| ------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `set(**kwargs)`    | **Inserts** or **Updates** a row in the database. If a row with the given name exists, it updates the row. |
+| `get(id: int)`     | **Retrieves a single row** from the database by its id.                                                    |
+| `get_by(**kwargs)` | **Retrieves a single row** from the database by its key and value.                                         |
+| `all()`            | **Retrieves all rows** from the database and returns them as a list of dictionaries.                       |
+| `delete(**kwargs)` | **Deletes a single row** from the database by its key and value.                                           |
+| `delete_all()`     | **Deletes all rows** from the database.                                                                    |
+| `drop()`           | **Drops the entire table** from the database.                                                              |
+| `dump(file_path)`  | **Save table** to a JSON file.                                                                             |
+| `load(file_path)`  | **Load table** from a JSON file.                                                                           |
 
 ## Note
 
@@ -40,6 +40,8 @@ In SQLow, all tables include `id` and `name` columns. This design choice aligns 
 Here's a practical example that demonstrates how to use SQLow to manage file-like data in an SQLite database.
 
 ```python
+import datetime
+
 from sqlow import sqlow
 
 # Initialize SQLow with the SQLite database
@@ -52,6 +54,7 @@ class Components:
     docs: str
     meta: dict
     info: list
+    date: datetime.datetime
 
 # Create an instance of the table
 table = Components()
@@ -63,6 +66,7 @@ table.set(
     docs="Component documentation",
     meta={"author": "John Doe"},
     info=[1, 2, 3]
+    date=datetime.datetime.now(datetime.UTC),
 )
 
 # Retrieve a single record by name
@@ -93,6 +97,8 @@ table.drop()
 ## Usage of **`create_table`**
 
 ```python
+import datetime
+
 from sqlow import create_table
 
 fields = {
@@ -100,6 +106,7 @@ fields = {
     "docs": str,
     "meta": dict,
     "info": list,
+    "date": datetime.datetime
 }
 
 table = create_table("db.sqlite3", "Components", **fields)

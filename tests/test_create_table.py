@@ -1,6 +1,6 @@
-from sqlow import create_table
 import pytest
 
+from sqlow import create_table
 
 # Define a table <Fields>
 fields = {
@@ -13,7 +13,8 @@ fields = {
 
 
 # Create an instance of the table
-Components = lambda: create_table("db.sqlite3", "Components", **fields)
+def Components():
+    return create_table("db.sqlite3", "Components", **fields)
 
 
 fake_data = dict(
@@ -46,7 +47,7 @@ def test_set_insert_and_get():
     # Retrieve a single record by name
     item = table.get_by(name="button")
     assert item["project_id"] == 1
-    assert item["is_good"] == True
+    assert item["is_good"] is True
     assert item["name"] == "button"
     assert item["docs"] == "Component documentation"
     # Add more assertions for other fields

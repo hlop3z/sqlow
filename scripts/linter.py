@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """Project --> Watchdog:
-    This module is to watch for changes in your Python-Project.
-    It uses ( isort, black & pylint ) to clean and analyze your <code>.
+This module is to watch for changes in your Python-Project.
+It uses ( isort, black & pylint ) to clean and analyze your <code>.
 """
 
 import subprocess
@@ -50,7 +50,10 @@ class Handler(watchdog.events.PatternMatchingEventHandler):
     def on_modified(self, event):
         path_to_watch = event.src_path
         print(f"""Fixing... { path_to_watch }""")
-        py_cmd = lambda cmd: f'''python -m {cmd} "{ path_to_watch }"'''
+
+        # Python CMD
+        def py_cmd(cmd):
+            return f'python -m {cmd} "{path_to_watch}"'
 
         # Fixing & Rating
         shell_cmd("isort", py_cmd("isort --profile black"))

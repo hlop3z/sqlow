@@ -1,6 +1,6 @@
-from sqlow import sqlow
 import pytest
 
+from sqlow import sqlow
 
 # Initialize SQLow with the SQLite database
 sqlite = sqlow("db.sqlite3")
@@ -46,7 +46,7 @@ def test_insert_and_get():
     # Retrieve a single record by name
     item = table.get_by(name="button")
     assert item["project_id"] == 1
-    assert item["is_good"] == True
+    assert item["is_good"] is True
     assert item["name"] == "button"
     assert item["docs"] == "Component documentation"
     # Add more assertions for other fields
@@ -65,7 +65,7 @@ def test_rename():
     assert item["name"] == "alert"
     assert item["project_id"] == 1
     assert item["docs"] == "Component documentation"
-    assert button == None
+    assert button is None
     # Add more assertions for other fields
 
 

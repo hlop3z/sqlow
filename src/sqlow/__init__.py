@@ -2,11 +2,12 @@
 SQLow is a lightweight Python library that simplifies SQLite database operations,
 specifically tailored for file-like data management.
 
-If you work with frontend components written in TypeScript or JavaScript,
+For example, if you work with frontend components written in TypeScript or JavaScript,
 SQLow offers an intuitive way to manage data as if they were files,
 all while benefiting from the power and efficiency of an SQLite database.
 """
 
+import datetime
 import functools
 import json
 import re
@@ -24,21 +25,44 @@ class PreDefinedClass:
     name: str = None  # type: ignore[assignment]
 
 
+DATETIME = [
+    datetime.datetime,
+    datetime.date,
+    datetime.time,
+]
+
+
 def slugify(text):
     """
     Convert a string to a slug format.
-
-    Args:
-        text (str): The input text.
-
-    Returns:
-        str: The slugified text.
     """
     text = re.sub(r"[^\w\s-]", "", text.lower())
     text = re.sub(r"[-\s]+", "-", text)
     text = re.sub(r"^-|-$", "", text)  # Remove leading or trailing "-"
     text = re.sub(r"--+", "-", text)  # Replace double "--" with single "-"
     return text
+
+
+def to_isoformat(obj):
+    """
+    Convert a date/time to a string.
+    """
+    if isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+    if isinstance(obj, datetime.date):
+        return obj.isoformat()
+    if isinstance(obj, datetime.time):
+        return obj.isoformat()
+    if isinstance(obj, str):
+        return obj
+    raise TypeError("Unsupported type")
+
+
+def from_iso(value):
+    """
+    Convert a string to a date/time.
+    """
+    return datetime.datetime.fromisoformat(value) if value else None
 
 
 class Value:
@@ -49,44 +73,52 @@ class Value:
         """Load SQLite Row"""
         dataclass_type = the_class.__daclass__
         obj_data = dict(db_row) if db_row else None
-        processed_object = {}
+        output = {}
         if not obj_data:
             return None
         for field in fields(dataclass_type):
             field_name = field.name
             field_value: typing.Any = obj_data.get(field_name)
 
-            if field.type == float:
-                processed_object[field_name] = Decimal(str(field_value))
-            elif field.type == bool:
-                processed_object[field_name] = True if field_value == 1 else False
+            # Process Value
+            if field.type is float:
+                output[field_name] = Decimal(str(field_value))
+            elif field.type is bool:
+                output[field_name] = field_value == 1
+            # elif field.type in DATETIME:
+            #    output[field_name] = from_isoformat(field_value)
             elif field.type in [dict, list]:
-                processed_object[field_name] = (
-                    json.loads(field_value) if field_value else None
-                )
+                output[field_name] = json.loads(field_value) if field_value else None
             else:
-                processed_object[field_name] = field_value
-        return processed_object
+                output[field_name] = field_value
+        return output
 
     @staticmethod
-    def dump(the_class, **kwargs) -> dict:
+    def dump(dcls, **kwargs) -> dict:
         """Dump SQLite Row"""
-        processed_values: typing.Any = {}
-        for key, value in kwargs.items():
-            field = next(f for f in fields(the_class.__daclass__) if f.name == key)
+        output: typing.Any = {}
+        for field_name, field_value in kwargs.items():
+            field = next(
+                (f for f in fields(dcls.__daclass__) if f.name == field_name), None
+            )
+            if field is None:
+                raise KeyError(f"Field {{ {field_name} }} not found")
+            # Field Type
             field_type = field.type
             # Process Value
-            if field_type == float:
+            if field_type is float:
                 # Convert float to Decimal
-                processed_values[key] = Decimal(str(value))
+                output[field_name] = Decimal(str(field_value))
+            elif field.type in DATETIME:
+                output[field_name] = to_isoformat(field_value)
             elif field_type in [dict, list]:
                 # Convert dict or list to JSON string
-                processed_values[key] = json.dumps(value)
+                output[field_name] = json.dumps(field_value)
             else:
-                processed_values[key] = value
-            if key == "name":
-                processed_values[key] = slugify(value)
-        return processed_values
+                output[field_name] = field_value
+            if field_name == "name":
+                output[field_name] = slugify(field_value)
+        return output
 
 
 def create_table_from_dataclass(the_class):
@@ -102,13 +134,15 @@ def create_table_from_dataclass(the_class):
     for field in fields(dataclass_type):
         field_type = field.type
         field_config: str = ""
-        if field_type == str:
+        if field_type is str:
             field_config = f"{field.name} TEXT"
-        elif field_type == int:
+        elif field_type in DATETIME:
+            field_config = f"{field.name} TEXT"
+        elif field_type is int:
             field_config = f"{field.name} INTEGER"
-        elif field_type == float:
+        elif field_type is float:
             field_config = f"{field.name} DECIMAL"
-        elif field_type == bool:
+        elif field_type is bool:
             field_config = f"{field.name} BOOLEAN"
         elif field.type in [dict, list]:
             field_config = f"{field.name} JSON"
@@ -261,7 +295,7 @@ class SQLowDatabase:
         response = None
         try:
             response = self.cursor.execute(query, params or ())
-        except:
+        except:  # noqa: E722
             response = False
         self._close()
         return response
@@ -368,6 +402,29 @@ class SQLowDatabase:
             del current["id"]
             self.update(item_id, **current)
 
+    def dump(self, file_path: str):
+        """
+        Save Table as JSON
+        """
+        with open(file_path, "w", encoding="utf-8") as file:
+            data = self.all()
+            json.dump(data, file, sort_keys=True, indent=4)
+
+    def load(self, file_path: str):
+        """
+        Load Table as JSON
+        """
+        with open(file_path, "r", encoding="utf-8") as file:
+            try:
+                data = json.load(file)
+            except:  # noqa: E722
+                data = []
+            for item in data:
+                try:
+                    self.insert(**item)
+                except:  # noqa: E722
+                    pass
+
 
 def class_schema_kwargs(cls, **kwargs):
     """
@@ -468,8 +525,8 @@ def sqlow(database: str):
     return sqlow_database
 
 
-def create_table(database, table_name, **columns):
+def create_table(__database, __table_name, **columns):
     """Dynamically create the table"""
-    sqlite = sqlow(database)
-    new_class = type(table_name, (), {**columns, "__annotations__": columns})
+    sqlite = sqlow(__database)
+    new_class = type(__table_name, (), {**columns, "__annotations__": columns})
     return sqlite(new_class)()
