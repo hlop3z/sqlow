@@ -65,7 +65,7 @@ table.set(
     project_id=1,
     docs="Component documentation",
     meta={"author": "John Doe"},
-    info=[1, 2, 3]
+    info=[1, 2, 3],
     date=datetime.datetime.now(datetime.UTC),
 )
 
