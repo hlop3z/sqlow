@@ -31,7 +31,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, TypeVar, get_origin
 
 T = TypeVar("T")
@@ -44,6 +44,9 @@ TYPE_MAP = {
     bool: "INTEGER",
     dict: "TEXT",  # JSON
     list: "TEXT",  # JSON
+    datetime: "TEXT",  # ISO format
+    date: "TEXT",  # ISO format
+    time: "TEXT",  # ISO format
 }
 
 # Auto-managed fields
@@ -79,6 +82,20 @@ def _is_bool_type(py_type: Any) -> bool:
     return py_type is bool
 
 
+def _is_datetime_type(py_type: Any) -> type[datetime] | type[date] | type[time] | None:
+    """Check if type is datetime, date, or time. Returns the type or None."""
+    origin = get_origin(py_type)
+    if origin is not None:
+        py_type = next((a for a in py_type.__args__ if a is not type(None)), str)
+    if py_type is datetime:
+        return datetime
+    if py_type is date:
+        return date
+    if py_type is time:
+        return time
+    return None
+
+
 @dataclass
 class _FieldInfo:
     """Field metadata for SQL generation."""
@@ -88,6 +105,7 @@ class _FieldInfo:
     sql_type: str
     is_json: bool
     is_bool: bool
+    datetime_type: type[datetime] | type[date] | type[time] | None
 
 
 @dataclass
@@ -116,6 +134,42 @@ class Model:
     updated_at: str | None = None
     deleted_at: str | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict with datetime types serialized to ISO strings."""
+        result: dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, (datetime, date, time)):
+                result[f.name] = value.isoformat()
+            else:
+                result[f.name] = value
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Model":
+        """Create instance from dict, parsing ISO strings to datetime types."""
+        parsed: dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name not in data:
+                continue
+            value = data[f.name]
+            if value is None:
+                parsed[f.name] = None
+            else:
+                dt_type = _is_datetime_type(f.type)
+                if dt_type is datetime and isinstance(value, str):
+                    dt = datetime.fromisoformat(value)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    parsed[f.name] = dt
+                elif dt_type is date and isinstance(value, str):
+                    parsed[f.name] = date.fromisoformat(value)
+                elif dt_type is time and isinstance(value, str):
+                    parsed[f.name] = time.fromisoformat(value)
+                else:
+                    parsed[f.name] = value
+        return cls(**parsed)
+
 
 def _get_fields(cls: type) -> list[_FieldInfo]:
     """Extract field info from dataclass."""
@@ -128,6 +182,7 @@ def _get_fields(cls: type) -> list[_FieldInfo]:
                 sql_type=_get_sqlite_type(f.type),
                 is_json=_is_json_type(f.type),
                 is_bool=_is_bool_type(f.type),
+                datetime_type=_is_datetime_type(f.type),
             )
         )
     return result
@@ -187,6 +242,15 @@ class Table[T]:
                 row[key] = None
             elif field.is_json:
                 row[key] = json.dumps(value)
+            elif field.datetime_type is datetime and isinstance(value, datetime):
+                # Always store datetime in UTC
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
+                else:
+                    value = value.astimezone(timezone.utc)
+                row[key] = value.isoformat()
+            elif field.datetime_type is not None and isinstance(value, (date, time)):
+                row[key] = value.isoformat()
             else:
                 row[key] = value
         return row
@@ -202,6 +266,16 @@ class Table[T]:
                 data[f.name] = json.loads(value)
             elif f.is_bool:
                 data[f.name] = bool(value)
+            elif f.datetime_type is datetime and isinstance(value, str):
+                dt = datetime.fromisoformat(value)
+                # Ensure UTC timezone
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                data[f.name] = dt
+            elif f.datetime_type is date and isinstance(value, str):
+                data[f.name] = date.fromisoformat(value)
+            elif f.datetime_type is time and isinstance(value, str):
+                data[f.name] = time.fromisoformat(value)
             else:
                 data[f.name] = value
         return self._cls(**data)

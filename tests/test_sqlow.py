@@ -1,8 +1,10 @@
 """Tests for sqlow - dataclass-native SQLite CRUD."""
 
+import json
 import os
 import pytest
 from dataclasses import dataclass
+from datetime import datetime, date, time, timezone
 
 from sqlow import SQL, Model, Count
 
@@ -32,6 +34,16 @@ class SimpleItem:
 
     id: str | None = None
     name: str = ""
+
+
+@dataclass
+class Event(Model):
+    """Model with datetime fields for testing."""
+
+    title: str = ""
+    starts_at: datetime | None = None
+    event_date: date | None = None
+    event_time: time | None = None
 
 
 @pytest.fixture(autouse=True)
@@ -625,3 +637,258 @@ class TestEdgeCases:
         # Pass updated_at which SimpleItem doesn't have - should skip
         result = items.update({"id": added[0].id, "updated_at": "ignored"})
         assert result == []
+
+
+class TestDatetime:
+    """Test datetime, date, time support."""
+
+    def test_create_with_datetime(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        result = events.create(title="Meeting", starts_at=dt)
+
+        assert result[0].starts_at == dt
+        assert isinstance(result[0].starts_at, datetime)
+
+    def test_datetime_always_utc(self):
+        """Naive datetime is treated as UTC."""
+        db = SQL(TEST_DB)
+        events = db(Event)
+        naive_dt = datetime(2024, 6, 15, 10, 30, 0)  # no timezone
+        result = events.create(title="Meeting", starts_at=naive_dt)
+
+        # Should be stored and returned as UTC
+        assert result[0].starts_at.tzinfo == timezone.utc
+        assert result[0].starts_at == datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+
+    def test_create_with_date(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        d = date(2024, 6, 15)
+        result = events.create(title="Holiday", event_date=d)
+
+        assert result[0].event_date == d
+        assert isinstance(result[0].event_date, date)
+
+    def test_create_with_time(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        t = time(10, 30, 0)
+        result = events.create(title="Daily standup", event_time=t)
+
+        assert result[0].event_time == t
+        assert isinstance(result[0].event_time, time)
+
+    def test_read_preserves_datetime_types(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        d = date(2024, 6, 15)
+        t = time(10, 30, 0)
+
+        added = events.create(title="Full event", starts_at=dt, event_date=d, event_time=t)
+        result = events.read(id=added[0].id)
+
+        assert result[0].starts_at == dt
+        assert result[0].event_date == d
+        assert result[0].event_time == t
+
+    def test_update_datetime(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt1 = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt2 = datetime(2024, 7, 20, 14, 0, 0, tzinfo=timezone.utc)
+
+        added = events.create(title="Meeting", starts_at=dt1)
+        updated = events.update(id=added[0].id, starts_at=dt2)
+
+        assert updated[0].starts_at == dt2
+
+    def test_filter_by_datetime(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        events.create(title="Meeting", starts_at=dt)
+
+        result = events.read(starts_at=dt)
+        assert len(result) == 1
+        assert result[0].title == "Meeting"
+
+    def test_null_datetime(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        result = events.create(title="No date")
+
+        assert result[0].starts_at is None
+        assert result[0].event_date is None
+        assert result[0].event_time is None
+
+    def test_datetime_without_tz_in_db(self):
+        """Datetime stored without timezone (legacy data) is treated as UTC."""
+        import sqlite3
+
+        db = SQL(TEST_DB)
+        events = db(Event)
+
+        # Insert directly with naive datetime string (no timezone)
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO event (id, title, starts_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("test-id", "Legacy", "2024-06-15T10:30:00", "2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        # Read back - should be UTC
+        result = events.read(id="test-id")
+        assert result[0].starts_at.tzinfo == timezone.utc
+
+
+class TestToDict:
+    """Test to_dict() method."""
+
+    def test_to_dict_basic(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+        result = items.create(name="test", count=5)
+
+        d = result[0].to_dict()
+        assert isinstance(d, dict)
+        assert d["name"] == "test"
+        assert d["count"] == 5
+        assert d["id"] is not None
+
+    def test_to_dict_with_datetime(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        result = events.create(title="Meeting", starts_at=dt)
+
+        d = result[0].to_dict()
+        assert d["starts_at"] == "2024-06-15T10:30:00+00:00"
+        assert isinstance(d["starts_at"], str)
+
+    def test_to_dict_with_date(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        d = date(2024, 6, 15)
+        result = events.create(title="Holiday", event_date=d)
+
+        data = result[0].to_dict()
+        assert data["event_date"] == "2024-06-15"
+
+    def test_to_dict_with_time(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        t = time(10, 30, 0)
+        result = events.create(title="Standup", event_time=t)
+
+        data = result[0].to_dict()
+        assert data["event_time"] == "10:30:00"
+
+    def test_to_dict_json_serializable(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        d = date(2024, 6, 15)
+        t = time(10, 30, 0)
+
+        result = events.create(title="Event", starts_at=dt, event_date=d, event_time=t)
+
+        # Should not raise - all values are JSON serializable
+        json_str = json.dumps(result[0].to_dict())
+        assert "2024-06-15" in json_str
+
+    def test_to_dict_list(self):
+        db = SQL(TEST_DB)
+        events = db(Event)
+        events.create({"title": "A"}, {"title": "B"})
+
+        result = events.read()
+        data = [e.to_dict() for e in result]
+
+        assert len(data) == 2
+        json_str = json.dumps(data)
+        assert "A" in json_str
+        assert "B" in json_str
+
+
+class TestFromDict:
+    """Test from_dict() class method."""
+
+    def test_from_dict_basic(self):
+        item = Item.from_dict({"name": "test", "count": 5})
+
+        assert item.name == "test"
+        assert item.count == 5
+
+    def test_from_dict_with_datetime(self):
+        event = Event.from_dict({
+            "title": "Meeting",
+            "starts_at": "2024-06-15T10:30:00+00:00"
+        })
+
+        assert event.title == "Meeting"
+        assert isinstance(event.starts_at, datetime)
+        assert event.starts_at == datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+
+    def test_from_dict_datetime_naive_becomes_utc(self):
+        event = Event.from_dict({
+            "title": "Meeting",
+            "starts_at": "2024-06-15T10:30:00"  # no timezone
+        })
+
+        assert event.starts_at.tzinfo == timezone.utc
+
+    def test_from_dict_with_date(self):
+        event = Event.from_dict({
+            "title": "Holiday",
+            "event_date": "2024-06-15"
+        })
+
+        assert isinstance(event.event_date, date)
+        assert event.event_date == date(2024, 6, 15)
+
+    def test_from_dict_with_time(self):
+        event = Event.from_dict({
+            "title": "Standup",
+            "event_time": "10:30:00"
+        })
+
+        assert isinstance(event.event_time, time)
+        assert event.event_time == time(10, 30, 0)
+
+    def test_from_dict_null_values(self):
+        event = Event.from_dict({
+            "title": "No date",
+            "starts_at": None
+        })
+
+        assert event.starts_at is None
+
+    def test_from_dict_partial(self):
+        """from_dict with only some fields."""
+        event = Event.from_dict({"title": "Partial"})
+
+        assert event.title == "Partial"
+        assert event.starts_at is None
+
+    def test_from_dict_roundtrip(self):
+        """to_dict -> from_dict should preserve data."""
+        db = SQL(TEST_DB)
+        events = db(Event)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        d = date(2024, 6, 15)
+        t = time(10, 30, 0)
+
+        original = events.create(title="Event", starts_at=dt, event_date=d, event_time=t)[0]
+
+        # Roundtrip
+        data = original.to_dict()
+        restored = Event.from_dict(data)
+
+        assert restored.title == original.title
+        assert restored.starts_at == original.starts_at
+        assert restored.event_date == original.event_date
+        assert restored.event_time == original.event_time

@@ -138,26 +138,50 @@ posts = db(Post)
 
 ### Type Support
 
-| Python Type | SQLite Type | Notes           |
-| ----------- | ----------- | --------------- |
-| `str`       | TEXT        |                 |
-| `int`       | INTEGER     |                 |
-| `float`     | REAL        |                 |
-| `bool`      | INTEGER     | Stored as 0/1   |
-| `dict`      | TEXT        | JSON serialized |
-| `list`      | TEXT        | JSON serialized |
+| Python Type | SQLite Type | Notes              |
+| ----------- | ----------- | ------------------ |
+| `str`       | TEXT        |                    |
+| `int`       | INTEGER     |                    |
+| `float`     | REAL        |                    |
+| `bool`      | INTEGER     | Stored as 0/1      |
+| `dict`      | TEXT        | JSON serialized    |
+| `list`      | TEXT        | JSON serialized    |
+| `datetime`  | TEXT        | ISO format, UTC    |
+| `date`      | TEXT        | ISO format         |
+| `time`      | TEXT        | ISO format         |
+
+### Datetime Support
+
+Native support for `datetime`, `date`, and `time` types. Datetimes are always stored in UTC:
+
+```python
+from datetime import datetime, date, time
+
+@dataclass
+class Event(Model):
+    title: str = ""
+    starts_at: datetime | None = None
+    event_date: date | None = None
+    event_time: time | None = None
+
+events = db(Event)
+events.create(title="Meeting", starts_at=datetime.now())  # Stored as UTC
+```
 
 ### JSON Serialization
 
-Dataclass instances convert easily to JSON:
+Use `to_dict()` and `from_dict()` for JSON-safe roundtrips:
 
 ```python
-from dataclasses import asdict
 import json
 
+# Serialize
 users = db(User)
 data = users.read()
-json.dumps([asdict(u) for u in data])
+json.dumps([u.to_dict() for u in data])  # datetime -> ISO string
+
+# Deserialize
+user = User.from_dict({"name": "Alice", "starts_at": "2024-06-15T10:30:00+00:00"})
 ```
 
 ## Use Cases
