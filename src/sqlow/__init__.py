@@ -1,532 +1,474 @@
 """
-SQLow is a lightweight Python library that simplifies SQLite database operations,
-specifically tailored for file-like data management.
+SQL - Dataclass-native SQLite. Zero boilerplate CRUD.
 
-For example, if you work with frontend components written in TypeScript or JavaScript,
-SQLow offers an intuitive way to manage data as if they were files,
-all while benefiting from the power and efficiency of an SQLite database.
+Usage:
+    from dataclasses import dataclass
+    from sqlow import SQL, Model
+
+    db = SQL("app.db")
+
+    @dataclass
+    class Component(Model):
+        name: str = ""
+        project_id: int = 0
+
+    @dataclass
+    class Project(Model):
+        title: str = ""
+
+    components = db(Component)
+    projects = db(Project)
+
+    components.create(name="button")            # -> [Component(...)]
+    components.read(id="abc-123")                # -> [Component(...)] or []
+    components.update(id="abc-123", name="new")  # -> [Component(...)]
+    components.delete(id="abc-123")              # -> [Component(...)]
 """
 
-import datetime
-import functools
+from __future__ import annotations
+
 import json
-import re
 import sqlite3
-import types
-import typing
-from dataclasses import dataclass, fields
-from decimal import Decimal
+import uuid
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import datetime, timezone
+from typing import Any, TypeVar, get_origin
+
+T = TypeVar("T")
+
+# Type mapping: Python -> SQLite
+TYPE_MAP = {
+    int: "INTEGER",
+    str: "TEXT",
+    float: "REAL",
+    bool: "INTEGER",
+    dict: "TEXT",  # JSON
+    list: "TEXT",  # JSON
+}
+
+# Auto-managed fields
+AUTO_FIELDS = {"id", "created_at", "updated_at", "deleted_at"}
 
 
-class PreDefinedClass:
-    """PreDefinedClass"""
-
-    id: int = None  # type: ignore[assignment]
-    name: str = None  # type: ignore[assignment]
+def _now() -> str:
+    """Current UTC timestamp as ISO string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
-DATETIME = [
-    datetime.datetime,
-    datetime.date,
-    datetime.time,
-]
+def _get_sqlite_type(py_type: Any) -> str:
+    """Map Python type to SQLite type."""
+    origin = get_origin(py_type)
+    if origin is not None:
+        py_type = next((a for a in py_type.__args__ if a is not type(None)), str)
+    return TYPE_MAP.get(py_type, "TEXT")
 
 
-def slugify(text):
+def _is_json_type(py_type: Any) -> bool:
+    """Check if type should be JSON serialized."""
+    origin = get_origin(py_type)
+    if origin is not None:
+        py_type = next((a for a in py_type.__args__ if a is not type(None)), str)
+    return py_type in (dict, list)
+
+
+def _is_bool_type(py_type: Any) -> bool:
+    """Check if type is bool."""
+    origin = get_origin(py_type)
+    if origin is not None:
+        py_type = next((a for a in py_type.__args__ if a is not type(None)), str)
+    return py_type is bool
+
+
+@dataclass
+class _FieldInfo:
+    """Field metadata for SQL generation."""
+
+    name: str
+    py_type: Any
+    sql_type: str
+    is_json: bool
+    is_bool: bool
+
+
+@dataclass
+class Count:
+    """Pagination info returned by count()."""
+
+    total: int
+    pages: int
+    per_page: int
+
+
+@dataclass
+class Model:
     """
-    Convert a string to a slug format.
+    Base model with auto-managed fields.
+
+    Inherit from this to get:
+    - id: UUID auto-generated on insert
+    - created_at: timestamp auto-set on insert
+    - updated_at: timestamp auto-set on update
+    - deleted_at: timestamp for soft deletes
     """
-    text = re.sub(r"[^\w\s-]", "", text.lower())
-    text = re.sub(r"[-\s]+", "-", text)
-    text = re.sub(r"^-|-$", "", text)  # Remove leading or trailing "-"
-    text = re.sub(r"--+", "-", text)  # Replace double "--" with single "-"
-    return text
+
+    id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    deleted_at: str | None = None
 
 
-def to_isoformat(obj):
-    """
-    Convert a date/time to a string.
-    """
-    if isinstance(obj, datetime.datetime):
-        return obj.isoformat()
-    if isinstance(obj, datetime.date):
-        return obj.isoformat()
-    if isinstance(obj, datetime.time):
-        return obj.isoformat()
-    if isinstance(obj, str):
-        return obj
-    raise TypeError("Unsupported type")
-
-
-def from_iso(value):
-    """
-    Convert a string to a date/time.
-    """
-    return datetime.datetime.fromisoformat(value) if value else None
-
-
-class Value:
-    """Load & Dump Values to SQLite"""
-
-    @staticmethod
-    def load(the_class, db_row) -> dict | None:
-        """Load SQLite Row"""
-        dataclass_type = the_class.__daclass__
-        obj_data = dict(db_row) if db_row else None
-        output = {}
-        if not obj_data:
-            return None
-        for field in fields(dataclass_type):
-            field_name = field.name
-            field_value: typing.Any = obj_data.get(field_name)
-
-            # Process Value
-            if field.type is float:
-                output[field_name] = Decimal(str(field_value))
-            elif field.type is bool:
-                output[field_name] = field_value == 1
-            # elif field.type in DATETIME:
-            #    output[field_name] = from_isoformat(field_value)
-            elif field.type in [dict, list]:
-                output[field_name] = json.loads(field_value) if field_value else None
-            else:
-                output[field_name] = field_value
-        return output
-
-    @staticmethod
-    def dump(dcls, **kwargs) -> dict:
-        """Dump SQLite Row"""
-        output: typing.Any = {}
-        for field_name, field_value in kwargs.items():
-            field = next(
-                (f for f in fields(dcls.__daclass__) if f.name == field_name), None
+def _get_fields(cls: type) -> list[_FieldInfo]:
+    """Extract field info from dataclass."""
+    result = []
+    for f in fields(cls):
+        result.append(
+            _FieldInfo(
+                name=f.name,
+                py_type=f.type,
+                sql_type=_get_sqlite_type(f.type),
+                is_json=_is_json_type(f.type),
+                is_bool=_is_bool_type(f.type),
             )
-            if field is None:
-                raise KeyError(f"Field {{ {field_name} }} not found")
-            # Field Type
-            field_type = field.type
-            # Process Value
-            if field_type is float:
-                # Convert float to Decimal
-                output[field_name] = Decimal(str(field_value))
-            elif field.type in DATETIME:
-                output[field_name] = to_isoformat(field_value)
-            elif field_type in [dict, list]:
-                # Convert dict or list to JSON string
-                output[field_name] = json.dumps(field_value)
-            else:
-                output[field_name] = field_value
-            if field_name == "name":
-                output[field_name] = slugify(field_value)
-        return output
+        )
+    return result
 
 
-def create_table_from_dataclass(the_class):
-    """SQL-Query Generator for <Create-Table>"""
-    dataclass_type = the_class.__daclass__
-    dataclass_config = dataclass_type.__objconfig__.__dict__
-    table_name = dataclass_config.get("table_name")
-    table_unique = dataclass_config.get("unique", [])
-    table_unique_together = dataclass_config.get("unique_together", [])
-    table_columns = []
-    table_unique.append("name")
-    columns = ["id INTEGER PRIMARY KEY"]
-    for field in fields(dataclass_type):
-        field_type = field.type
-        field_config: str = ""
-        if field_type is str:
-            field_config = f"{field.name} TEXT"
-        elif field_type in DATETIME:
-            field_config = f"{field.name} TEXT"
-        elif field_type is int:
-            field_config = f"{field.name} INTEGER"
-        elif field_type is float:
-            field_config = f"{field.name} DECIMAL"
-        elif field_type is bool:
-            field_config = f"{field.name} BOOLEAN"
-        elif field.type in [dict, list]:
-            field_config = f"{field.name} JSON"
-        # Other Configs
-        if field.name in table_unique:
-            field_config = f"{field_config} UNIQUE"
-        # Append
-        if field.name != "id":
-            columns.append(field_config)
-        table_columns.append(field.name)
-
-    # unique_together
-    for items in table_unique_together:
-        columns.append(f"UNIQUE({ ', '.join(items) })")
-
-    # Build
-    columns_str = ", ".join(columns)
-    return f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_str})"
+def _has_soft_delete(cls: type) -> bool:
+    """Check if class has deleted_at field (inherits from Model)."""
+    return any(f.name == "deleted_at" for f in fields(cls))
 
 
-def kwargs_insert(self, **kwargs):
-    """
-    Generate the INSERT query and parameters for inserting data into the table.
+class Table[T]:
+    """CRUD operations for a dataclass table. Always returns list."""
 
-    Args:
-        self: The SQLowDatabase instance.
-        **kwargs: Key-value pairs representing the data to be inserted.
+    def __init__(self, db: SQL, cls: type[T]):
+        if not is_dataclass(cls):
+            raise TypeError(f"{cls.__name__} must be a dataclass")
 
-    Returns:
-        list: A list containing the query and parameters.
-    """
-    data = Value.dump(self, **kwargs)
-    keys = ", ".join(data.keys())
-    values = ", ".join("?" for _ in data.values())
-    query = f"INSERT INTO {self.table_name} ({keys}) VALUES ({values})"
-    return [query, tuple(data.values())]
+        self._db = db
+        self._cls = cls
+        self._table = cls.__name__.lower()
+        self._fields = _get_fields(cls)
+        self._field_map = {f.name: f for f in self._fields}
+        self._soft_delete = _has_soft_delete(cls)
+        self._create_table()
 
-
-def kwargs_update(self, item_id: str, **kwargs):
-    """
-    Generate the UPDATE query and parameters for updating data in the table.
-
-    Args:
-        self: The SQLowDatabase instance.
-        item_id (int): The name of the row to be updated.
-        **kwargs: Key-value pairs representing the data to be updated.
-
-    Returns:
-        list: A list containing the query and parameters.
-    """
-    data = Value.dump(self, **kwargs)
-    update_columns = ", ".join(f"{column} = ?" for column in data.keys())
-    query = f"UPDATE {self.table_name} SET {update_columns} WHERE id = ?"
-    return [query, tuple(data.values()) + (item_id,)]
-
-
-def kwargs_delete(self, **kwargs):
-    """
-    Generate the DELETE query and parameters for deleting data from the table.
-
-    Args:
-        self: The SQLowDatabase instance.
-        **kwargs: Key-value pairs representing the data to be used as conditions for deletion.
-
-    Returns:
-        list: A list containing the query and parameters.
-    """
-    data = Value.dump(self, **kwargs)
-    conditions = " AND ".join(f"{key} = ?" for key in data.keys())
-    query = f"DELETE FROM {self.table_name} WHERE {conditions}"
-    return [query, tuple(data.values())]
-
-
-def kwargs_select(self, **kwargs):
-    """
-    Generate the SELECT query and parameters for retrieving data from the table.
-
-    Args:
-        self: The SQLowDatabase instance.
-        **kwargs: Key-value pairs representing the conditions for selection.
-
-    Returns:
-        list: A list containing the query and parameters.
-    """
-    select_columns_str = "*"
-
-    if kwargs:
-        data = Value.dump(self, **kwargs)
-        conditions = " AND ".join(f"{key} = ?" for key in data.keys())
-        query = f"SELECT {select_columns_str} FROM {self.table_name} WHERE {conditions}"
-        params = tuple(data.values())
-    else:
-        query = f"SELECT {select_columns_str} FROM {self.table_name}"
-        params = ()
-
-    return [query, params]
-
-
-class SQLowDatabase:
-    """SQLow Database"""
-
-    def _connect(self):
-        """
-        Connect to the SQLite database and create a cursor.
-        """
-        self.connection = sqlite3.connect(self.db_name)
-        self.connection.row_factory = sqlite3.Row
-        self.cursor = self.connection.cursor()
-
-    def _close(self):
-        """
-        Commit changes and close the database connection.
-        """
-        self.connection.commit()
-        self.connection.close()
-
-    @property
-    def _create_table_query(self):
-        """Create Table Query"""
-        return create_table_from_dataclass(self)
-
-    def _initialize_table(self):
-        """
-        Initialize the table in the database if it doesn't exist.
-        """
-        self._connect()
-        self.cursor.execute(self._create_table_query)
-        self._close()
-
-    def __init__(self, table_class: typing.Any = None, db_name: str = "db.sqlite3"):
-        """
-        Initialize the SQLite Manager.
-
-        Args:
-            table_class (dataclass, optional): The dataclass representing the table structure.
-            db_name (str, optional): The name of the SQLite database file.
-        """
-        self.db_name = db_name
-        self.table_name = table_class.__objconfig__.table_name
-        self.__daclass__ = table_class
-        self._initialize_table()
-        self.cursor = types.SimpleNamespace()
-        self.connection = None
-
-    def execute(self, query, params=None):
-        """
-        execute database command.
-        """
-        self._connect()
-        response = None
+    def _sql(self, sql: str, params: tuple[Any, ...] = ()) -> tuple[list[sqlite3.Row], int]:
+        """Execute SQL, return (rows, lastrowid). Always closes connection."""
+        conn = sqlite3.connect(self._db.path)
+        conn.row_factory = sqlite3.Row
         try:
-            response = self.cursor.execute(query, params or ())
-        except:  # noqa: E722
-            response = False
-        self._close()
-        return response
+            cursor = conn.execute(sql, params)
+            rows = cursor.fetchall()
+            conn.commit()
+            return rows, cursor.lastrowid or 0
+        finally:
+            conn.close()
 
-    def fetch_one(self, query, params=None):
-        """
-        Get Single Record
-        """
-        self._connect()
-        self.cursor.execute(query, params or ())
-        response = self.cursor.fetchone()
-        self._close()
-        return response
+    def _create_table(self) -> None:
+        """Create table if not exists."""
+        cols = []
+        for f in self._fields:
+            if f.name == "id":
+                cols.append("id TEXT PRIMARY KEY")
+            else:
+                cols.append(f"{f.name} {f.sql_type}")
+        sql = f"CREATE TABLE IF NOT EXISTS {self._table} ({', '.join(cols)})"
+        self._sql(sql)
 
-    def fetch_all(self, query, params=None):
-        """
-        List Records
-        """
-        self._connect()
-        self.cursor.execute(query, params or ())
-        response = self.cursor.fetchall()
-        self._close()
-        return response
+    def _to_row(self, **kwargs: Any) -> dict[str, Any]:
+        """Convert Python values to SQLite values."""
+        row: dict[str, Any] = {}
+        for key, value in kwargs.items():
+            if key not in self._field_map:
+                raise KeyError(f"Unknown field: {key}")
+            field = self._field_map[key]
+            if value is None:
+                row[key] = None
+            elif field.is_json:
+                row[key] = json.dumps(value)
+            else:
+                row[key] = value
+        return row
 
-    def insert(self, **kwargs):
-        """
-        Insert Record.
-        """
-        return self.execute(*kwargs_insert(self, **kwargs))
+    def _from_row(self, row: sqlite3.Row) -> T:
+        """Convert SQLite row to dataclass instance."""
+        data: dict[str, Any] = {}
+        for f in self._fields:
+            value = row[f.name]
+            if value is None:
+                data[f.name] = None
+            elif f.is_json:
+                data[f.name] = json.loads(value)
+            elif f.is_bool:
+                data[f.name] = bool(value)
+            else:
+                data[f.name] = value
+        return self._cls(**data)
 
-    def update(self, item_id, **kwargs):
+    def create(self, *items: dict[str, Any] | T, **kwargs: Any) -> list[T]:
         """
-        Update Record.
-        """
-        return self.execute(*kwargs_update(self, item_id, **kwargs))
+        Insert records. Returns list of created items with IDs.
 
-    def get(self, item_id: str):
+        Usage:
+            table.create(name="button")
+            table.create({"name": "a"}, {"name": "b"})
+            table.create(Component(name="x"))
         """
-        {Get} <Row> in the Database.
-        """
-        return self.get_by(id=item_id)
+        records: list[dict[str, Any]] = []
+        if kwargs:
+            records.append(kwargs)
+        for item in items:
+            if is_dataclass(item) and not isinstance(item, type):
+                records.append(
+                    {f.name: getattr(item, f.name) for f in self._fields if f.name not in AUTO_FIELDS}
+                )
+            elif isinstance(item, dict):
+                records.append(item)
+            else:
+                raise TypeError(f"Expected dict or {self._cls.__name__}, got {type(item)}")
 
-    def get_by(self, **kwargs):
-        """
-        {Get-By} <Row> in the Database.
-        """
-        self._connect()
-        self.cursor.execute(*kwargs_select(self, **kwargs))
-        row = self.cursor.fetchone()
-        self._close()
-        return Value.load(self, row)
+        results: list[T] = []
+        for record in records:
+            # Strip auto fields from input
+            row = self._to_row(**{k: v for k, v in record.items() if k not in AUTO_FIELDS})
+            # Set auto fields
+            row["id"] = str(uuid.uuid4())
+            if "created_at" in self._field_map:
+                row["created_at"] = _now()
+            if "updated_at" in self._field_map:
+                row["updated_at"] = _now()
 
-    def all(self):
-        """
-        {Get-All} <Rows> in the Database.
-        """
-        self._connect()
-        self.cursor.execute(*kwargs_select(self))
-        rows = self.cursor.fetchall()
-        self._close()
-        return [Value.load(self, row) for row in rows]
+            cols = ", ".join(row.keys())
+            placeholders = ", ".join("?" for _ in row)
+            sql = f"INSERT INTO {self._table} ({cols}) VALUES ({placeholders})"
+            self._sql(sql, tuple(row.values()))
 
-    def delete(self, **kwargs):
-        """
-        {Delete} <Row> in the Database.
-        """
-        return self.execute(*kwargs_delete(self, **kwargs))
+            # Fetch inserted row
+            rows, _ = self._sql(f"SELECT * FROM {self._table} WHERE id = ?", (row["id"],))
+            if rows:
+                results.append(self._from_row(rows[0]))
 
-    def delete_all(self):
-        """
-        {Delete-All} <Rows> in the Database.
-        """
-        return self.execute(f"DELETE FROM {self.table_name}")
+        return results
 
-    def drop(self):
+    def read(
+        self,
+        include_deleted: bool = False,
+        page: int | None = None,
+        per_page: int = 10,
+        **kwargs: Any,
+    ) -> list[T]:
         """
-        Delete the table in the database if it exist.
-        """
-        return self.execute(f"DROP TABLE IF EXISTS {self.table_name}")
+        Select records. Returns list (empty if none found).
+        Excludes soft-deleted records by default.
 
-    def set(self, **kwargs):
+        Usage:
+            table.read()                      # all (non-deleted)
+            table.read(id="abc")              # by id
+            table.read(include_deleted=True)  # include soft-deleted
+            table.read(page=1)                # first page (10 items)
+            table.read(page=2, per_page=20)   # second page, 20 per page
         """
-        {Add | Update} <Row> in the Database.
-        """
-        item_id = kwargs.get("id")
-        row = None
-        if item_id:
-            row = self.get(item_id)
-        if row:
-            del kwargs["id"]
-            if len(kwargs) > 0:
-                self.update(item_id, **kwargs)
+        conditions = []
+        params: list[Any] = []
+
+        # Filter by kwargs
+        if kwargs:
+            row = self._to_row(**kwargs)
+            for k, v in row.items():
+                conditions.append(f"{k} = ?")
+                params.append(v)
+
+        # Exclude soft-deleted unless requested
+        if self._soft_delete and not include_deleted:
+            conditions.append("deleted_at IS NULL")
+
+        if conditions:
+            sql = f"SELECT * FROM {self._table} WHERE {' AND '.join(conditions)}"
         else:
-            self.insert(**kwargs)
+            sql = f"SELECT * FROM {self._table}"
 
-    def rename(self, old_name: str, new_name: str):
+        # Pagination (1-indexed pages)
+        if page is not None:
+            offset = (max(1, page) - 1) * per_page
+            sql += f" LIMIT {int(per_page)} OFFSET {int(offset)}"
+
+        rows, _ = self._sql(sql, tuple(params))
+        return [self._from_row(r) for r in rows]
+
+    def update(self, *items: dict[str, Any] | T, **kwargs: Any) -> list[T]:
         """
-        {Rename} <Row> in the Database.
+        Update records by id. Returns list of updated items.
+        Auto-updates updated_at timestamp.
+
+        Usage:
+            table.update(id="abc", name="new")
+            table.update({"id": "abc", "name": "a"}, {"id": "def", "name": "b"})
         """
-        current = self.get_by(name=old_name)
-        if current:
-            current["name"] = new_name
-            item_id = current["id"]
-            del current["id"]
-            self.update(item_id, **current)
+        records: list[dict[str, Any]] = []
+        if kwargs:
+            records.append(kwargs)
+        for item in items:
+            if is_dataclass(item) and not isinstance(item, type):
+                records.append({f.name: getattr(item, f.name) for f in self._fields})
+            elif isinstance(item, dict):
+                records.append(item)
+            else:
+                raise TypeError(f"Expected dict or {self._cls.__name__}, got {type(item)}")
 
-    def dump(self, file_path: str):
+        results: list[T] = []
+        for record in records:
+            if "id" not in record or record["id"] is None:
+                raise ValueError("id required for update")
+
+            item_id = record["id"]
+            # Exclude auto fields except updated_at
+            update_data = {k: v for k, v in record.items() if k not in {"id", "created_at", "deleted_at"}}
+            if not update_data and "updated_at" not in self._field_map:
+                continue
+
+            row = self._to_row(**{k: v for k, v in update_data.items() if k != "updated_at"})
+            # Auto-update timestamp
+            if "updated_at" in self._field_map:
+                row["updated_at"] = _now()
+
+            if not row:
+                continue
+
+            set_clause = ", ".join(f"{k} = ?" for k in row.keys())
+            sql = f"UPDATE {self._table} SET {set_clause} WHERE id = ?"
+            self._sql(sql, (*row.values(), item_id))
+
+            # Fetch updated row
+            rows, _ = self._sql(f"SELECT * FROM {self._table} WHERE id = ?", (item_id,))
+            if rows:
+                results.append(self._from_row(rows[0]))
+
+        return results
+
+    def delete(self, *items: dict[str, Any] | T, hard: bool = False, **kwargs: Any) -> list[T]:
         """
-        Save Table as JSON
+        Delete records. Returns list of deleted items.
+        Uses soft delete by default (sets deleted_at).
+
+        Usage:
+            table.delete(id="abc")             # soft delete by id
+            table.delete(name="button")        # soft delete by field
+            table.delete()                     # soft delete all
+            table.delete(id="abc", hard=True)  # permanent delete
+            table.delete({"id": "a"}, {"id": "b"})  # batch delete
         """
-        with open(file_path, "w", encoding="utf-8") as file:
-            data = self.all()
-            json.dump(data, file, sort_keys=True, indent=4)
+        # Collect records from *items
+        records: list[dict[str, Any]] = []
+        if kwargs:
+            records.append(kwargs)
+        for item in items:
+            if is_dataclass(item) and not isinstance(item, type):
+                # For delete, only use id from dataclass instances
+                item_id = getattr(item, "id", None)
+                if item_id is not None:
+                    records.append({"id": item_id})
+                else:
+                    raise ValueError("id required for delete")
+            elif isinstance(item, dict):
+                records.append(item)
+            else:
+                raise TypeError(f"Expected dict or {self._cls.__name__}, got {type(item)}")
 
-    def load(self, file_path: str):
+        # If batch mode (records provided), delete each by its filter
+        if records:
+            results: list[T] = []
+            for record in records:
+                # Get items to return
+                found = self.read(include_deleted=hard, **record)
+                if not found:
+                    continue
+
+                row = self._to_row(**record)
+                if self._soft_delete and not hard:
+                    now = _now()
+                    conditions = " AND ".join(f"{k} = ?" for k in row.keys())
+                    sql = f"UPDATE {self._table} SET deleted_at = ? WHERE {conditions} AND deleted_at IS NULL"
+                    self._sql(sql, (now, *row.values()))
+                else:
+                    conditions = " AND ".join(f"{k} = ?" for k in row.keys())
+                    sql = f"DELETE FROM {self._table} WHERE {conditions}"
+                    self._sql(sql, tuple(row.values()))
+
+                results.extend(found)
+            return results
+
+        # No filters: delete all
+        all_items = self.read(include_deleted=hard)
+        if not all_items:
+            return []
+
+        if self._soft_delete and not hard:
+            sql = f"UPDATE {self._table} SET deleted_at = ? WHERE deleted_at IS NULL"
+            self._sql(sql, (_now(),))
+        else:
+            self._sql(f"DELETE FROM {self._table}")
+
+        return all_items
+
+    def count(
+        self, include_deleted: bool = False, per_page: int = 10, **kwargs: Any
+    ) -> Count:
         """
-        Load Table as JSON
+        Count records and return pagination info.
+
+        Usage:
+            info = table.count()           # Count(total=42, pages=5, per_page=10)
+            info = table.count(per_page=20)  # Count(total=42, pages=3, per_page=20)
+            info.total   # 42
+            info.pages   # 5
         """
-        with open(file_path, "r", encoding="utf-8") as file:
-            try:
-                data = json.load(file)
-            except:  # noqa: E722
-                data = []
-            for item in data:
-                try:
-                    self.insert(**item)
-                except:  # noqa: E722
-                    pass
+        conditions = []
+        params: list[Any] = []
+
+        if kwargs:
+            row = self._to_row(**kwargs)
+            for k, v in row.items():
+                conditions.append(f"{k} = ?")
+                params.append(v)
+
+        if self._soft_delete and not include_deleted:
+            conditions.append("deleted_at IS NULL")
+
+        if conditions:
+            sql = f"SELECT COUNT(*) FROM {self._table} WHERE {' AND '.join(conditions)}"
+        else:
+            sql = f"SELECT COUNT(*) FROM {self._table}"
+
+        rows, _ = self._sql(sql, tuple(params))
+        total = rows[0][0] if rows else 0
+        pages = (total + per_page - 1) // per_page if total > 0 else 0
+
+        return Count(total=total, pages=pages, per_page=per_page)
+
+    def drop(self) -> None:
+        """Drop the table."""
+        self._sql(f"DROP TABLE IF EXISTS {self._table}")
 
 
-def class_schema_kwargs(cls, **kwargs):
+class SQL:
     """
-    Generate a dictionary of class schema arguments.
+    SQLite database instance. Create tables by calling with a dataclass.
 
-    Args:
-        cls: The dataclass.
-        **kwargs: Additional keyword arguments.
+    Example:
+        db = SQL("app.db")
 
-    Returns:
-        dict: A dictionary of class schema arguments.
-    """
-    data = {key: None for key in cls.__annotations__.keys()}
-    data.update(kwargs)
-    return data
+        @dataclass
+        class Component(Model):
+            name: str = ""
 
-
-def decorator_config(_class, config: dict):
-    """
-    Configure the decorator for the data class.
-
-    Args:
-        _class: The data class.
-        config (dict): Configuration settings.
-
-    Returns:
-        None
-    """
-    _config: dict | types.SimpleNamespace = config
-    table_name = _config.get("table_name", _class.__name__.lower())
-    _class = dataclass(_class)
-    _config["table_name"] = table_name
-    _config = types.SimpleNamespace(**_config)
-    _class.__objconfig__ = _config
-
-
-def merge_data_classes(database, new_class, class_list, **config):
-    """
-    Merge multiple data classes into a single class.
-
-    Args:
-        database (str): The name of the database.
-        new_class: The new data class.
-        class_list: A list of existing data classes.
-        **config: Additional configuration.
-
-    Returns:
-        type: The merged class.
-    """
-    class_list.append(dataclass(new_class))
-    merged_annotations = {}
-    merged_attrs = {}
-
-    for cls in class_list:
-        merged_annotations.update(getattr(cls, "__annotations__", {}))
-
-    merged_attrs["__annotations__"] = merged_annotations
-
-    _class = type(
-        new_class.__name__, tuple(class_list[::-1]), merged_attrs
-    )  # Reverse the order of class_list
-
-    # Database Setup
-    decorator_config(_class, config)
-    _class.db = SQLowDatabase(db_name=database, table_class=_class)
-
-    return _class
-
-
-def sqlow(database: str):
-    """
-    Initialize the SQLow database decorator.
-
-    Args:
-        database (str): The name of the database.
-
-    Returns:
-        function: The SQLow database decorator.
+        components = db(Component)
+        components.create(name="button")
     """
 
-    def sqlow_database(_class=None, **params):
-        """Decorator with (Optional-Arguments)."""
+    def __init__(self, path: str):
+        self.path = path
 
-        # Optional Arguments
-        if _class is None:
-            return functools.partial(sqlow_database, **params)
-
-        # The Wrapper
-        @functools.wraps(_class)
-        def the_wrapper(*args, **kwargs):
-            cls = merge_data_classes(database, _class, [PreDefinedClass], **params)
-            data = class_schema_kwargs(cls, **kwargs)
-            return cls(*args, **data).db
-
-        # Return @Decorator
-        return the_wrapper
-
-    return sqlow_database
-
-
-def create_table(__database, __table_name, **columns):
-    """Dynamically create the table"""
-    sqlite = sqlow(__database)
-    new_class = type(__table_name, (), {**columns, "__annotations__": columns})
-    return sqlite(new_class)()
+    def __call__(self, cls: type[T]) -> Table[T]:
+        """Create a table for the given dataclass."""
+        return Table(self, cls)

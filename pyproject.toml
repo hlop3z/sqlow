@@ -1,34 +1,22 @@
 [project]
 name = "sqlow"
-version = "0.1.6"
-description = "SQLow is a lightweight Python library designed to streamline SQLite database operations with a focus on file-like data management."
+version = "0.2.0"
+description = "Dataclass-native SQLite."
+readme = "README.md"
 authors = [
     { name = "hlop3z", email = "23062270+hlop3z@users.noreply.github.com" },
 ]
+requires-python = ">=3.12"
 dependencies = []
-requires-python = ">=3.10"
-readme = "README.md"
-license = { text = "MIT" }
 
 [build-system]
-requires = ["pdm-backend"]
-build-backend = "pdm.backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.pdm.scripts]
-dev = "python scripts/linter.py"
-pre = { shell = "pre-commit run --all-file" }
-test = { shell = "pytest -rA tests/" }
-
-[tool.pdm.dev-dependencies]
-devops = [
-    "isort>=5.10.1",
-    "black>=22.6.0",
-    "pylint>=2.15.0",
-    "bandit>=1.7.4",
-    "watchdog>=2.1.9",
-    "twine>=4.0.1",
-    "mypy>=0.991",
-    "ssort>=0.11.6",
-    "pre-commit>=2.20.0",
+[dependency-groups]
+dev = [
+    # Dev Tools
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
 ]
-testing = ["pytest>=7.4.0"]

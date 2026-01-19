@@ -1,113 +1,320 @@
-# **SQLow**: **`DataClass`** SQLite Database Management for **File-like** Operations
+# SQLow
 
-SQLow is a lightweight Python library that simplifies SQLite database operations, specifically tailored for **file-like data management**. For example, if you work with frontend components written in TypeScript or JavaScript, SQLow offers an intuitive way to manage data as if they were files, all while benefiting from the power and efficiency of an SQLite database.
+Dataclass-native SQLite. Zero boilerplate CRUD.
 
-## Key Features
+```python
+from dataclasses import dataclass
+from sqlow import SQL, Model
 
-- **Simplified Database Operations:** SQLow streamlines database interactions using **data classes** and **decorators**, abstracting away the complexity of SQL queries.
-- **Efficient Data Serialization:** It efficiently handles data serialization for various data types, ensuring seamless integration with your codebase.
-- **Automatic Table Management:** SQLow automatically creates and manages database tables, sparing you from manual table setup.
-- **Customizable Table Configuration:** Tables can be configured with decorators, allowing you to define unique constraints and relationships.
+db = SQL("app.db")
 
-## Installation
+@dataclass
+class Task(Model):
+    title: str = ""
+    done: bool = False
 
-You can install **`SQLow`** using the following command:
+tasks = db(Task)
+tasks.create(title="Build something")
+```
+
+## Install
 
 ```sh
 pip install sqlow
 ```
 
-## Methods
+## Why SQLow?
 
-| Method             | Description                                                                                                |
-| ------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `set(**kwargs)`    | **Inserts** or **Updates** a row in the database. If a row with the given name exists, it updates the row. |
-| `get(id: int)`     | **Retrieves a single row** from the database by its id.                                                    |
-| `get_by(**kwargs)` | **Retrieves a single row** from the database by its key and value.                                         |
-| `all()`            | **Retrieves all rows** from the database and returns them as a list of dictionaries.                       |
-| `delete(**kwargs)` | **Deletes a single row** from the database by its key and value.                                           |
-| `delete_all()`     | **Deletes all rows** from the database.                                                                    |
-| `drop()`           | **Drops the entire table** from the database.                                                              |
-| `dump(file_path)`  | **Save table** to a JSON file.                                                                             |
-| `load(file_path)`  | **Load table** from a JSON file.                                                                           |
+- **Zero boilerplate** - Define a dataclass, get a database
+- **100% typed** - Full type hints, mypy strict compatible
+- **100% tested** - Complete test coverage
+- **Standard library only** - No dependencies beyond Python
+- **JSON-friendly** - Returns dataclass instances (easy `asdict()` for JSON)
 
-## Note
+## API
 
-In SQLow, all tables include `id` and `name` columns. This design choice aligns with the file-like nature of the data and simplifies operations.
+### Define Tables
 
-## Usage Example
-
-Here's a practical example that demonstrates how to use SQLow to manage file-like data in an SQLite database.
+Inherit from `Model` to get auto-managed fields:
 
 ```python
-import datetime
+from dataclasses import dataclass
+from sqlow import SQL, Model
 
-from sqlow import sqlow
+db = SQL("app.db")
 
-# Initialize SQLow with the SQLite database
-sqlite = sqlow("db.sqlite3")
+@dataclass
+class User(Model):
+    # Model provides: id, created_at, updated_at, deleted_at
+    name: str = ""
+    email: str = ""
+    active: bool = True
+    meta: dict | None = None  # JSON field
+    tags: list | None = None  # JSON field
 
-# Define a table using the SQLow decorator
-@sqlite
-class Components:
-    project_id: int
-    docs: str
-    meta: dict
-    info: list
-    date: datetime.datetime
-
-# Create an instance of the table
-table = Components()
-
-# Insert data into the table
-table.set(
-    name="button",
-    project_id=1,
-    docs="Component documentation",
-    meta={"author": "John Doe"},
-    info=[1, 2, 3],
-    date=datetime.datetime.now(datetime.UTC),
-)
-
-# Retrieve a single record by name
-item = table.get_by(name="button")
-print("Retrieved Item:", item)
-
-# Retrieve all records from the table
-all_items = table.all()
-print("All Items:", all_items)
-
-# Retrieve a single record by name
-item_to_update = table.get_by(name="button")
-
-# Update an existing record by name
-item_to_update["meta"] = {"new-meta": "planeta"}
-table.set(**item_to_update)
-
-# Delete a record by name
-table.delete(name="button")
-
-# Delete all records from the table
-table.delete_all()
-
-# Drop the entire table
-table.drop()
+users = db(User)
 ```
 
-## Usage of **`create_table`**
+### CRUD Operations
+
+All operations return `list[T]` for consistency:
 
 ```python
-import datetime
+# Create
+users.create(name="Alice", email="alice@example.com")
+users.create({"name": "Bob"}, {"name": "Charlie"})  # batch
 
-from sqlow import create_table
+# Read
+users.read()                    # all
+users.read(id="abc-123")        # by id
+users.read(name="Alice")        # by field
+users.read(page=1, per_page=10) # paginated
 
-fields = {
-    "project_id": int,
-    "docs": str,
-    "meta": dict,
-    "info": list,
-    "date": datetime.datetime
-}
+# Update
+users.update(id="abc-123", name="Alicia")
+users.update({"id": "a", "name": "A"}, {"id": "b", "name": "B"})  # batch
 
-table = create_table("db.sqlite3", "Components", **fields)
+# Delete (soft by default)
+users.delete(id="abc-123")            # soft delete
+users.delete(id="abc-123", hard=True) # permanent
+users.delete({"id": "a"}, {"id": "b"})  # batch delete
 ```
+
+### Model Fields
+
+When you inherit from `Model`, these fields are auto-managed:
+
+| Field        | Type          | Behavior                       |
+| ------------ | ------------- | ------------------------------ |
+| `id`         | `str`         | UUID, auto-generated on create |
+| `created_at` | `str`         | ISO timestamp, set on create   |
+| `updated_at` | `str`         | ISO timestamp, set on update   |
+| `deleted_at` | `str \| None` | ISO timestamp, set on delete   |
+
+### Pagination
+
+```python
+# Read paginated results (1-indexed)
+page1 = users.read(page=1, per_page=20)
+page2 = users.read(page=2, per_page=20)
+
+# Get count info
+info = users.count(per_page=20)
+info.total    # 42
+info.pages    # 3
+info.per_page # 20
+```
+
+### Soft Delete
+
+Records are soft-deleted by default (sets `deleted_at`):
+
+```python
+users.delete(id="abc-123")              # soft delete
+users.read()                            # excludes deleted
+users.read(include_deleted=True)        # includes deleted
+users.delete(id="abc-123", hard=True)   # permanent delete
+```
+
+### Multiple Tables
+
+One database, multiple tables:
+
+```python
+db = SQL("app.db")
+
+@dataclass
+class User(Model):
+    name: str = ""
+
+@dataclass
+class Post(Model):
+    title: str = ""
+    user_id: str = ""
+
+users = db(User)
+posts = db(Post)
+```
+
+### Type Support
+
+| Python Type | SQLite Type | Notes           |
+| ----------- | ----------- | --------------- |
+| `str`       | TEXT        |                 |
+| `int`       | INTEGER     |                 |
+| `float`     | REAL        |                 |
+| `bool`      | INTEGER     | Stored as 0/1   |
+| `dict`      | TEXT        | JSON serialized |
+| `list`      | TEXT        | JSON serialized |
+
+### JSON Serialization
+
+Dataclass instances convert easily to JSON:
+
+```python
+from dataclasses import asdict
+import json
+
+users = db(User)
+data = users.read()
+json.dumps([asdict(u) for u in data])
+```
+
+## Use Cases
+
+### CLI Tools & Scripts
+
+```python
+@dataclass
+class Job(Model):
+    command: str = ""
+    status: str = "pending"
+    output: str = ""
+
+jobs = SQL("jobs.db")(Job)
+jobs.create(command="python train.py")
+jobs.update(id=job_id, status="completed", output=result)
+```
+
+### Local-First Desktop Apps
+
+SQLite ships with the app. No server needed.
+
+```python
+@dataclass
+class Note(Model):
+    title: str = ""
+    content: str = ""
+    folder_id: str = ""
+
+notes = SQL("~/.myapp/notes.db")(Note)
+```
+
+### Prototyping & MVPs
+
+Get a working backend in minutes. Migrate to Postgres later.
+
+```python
+# Flask + SQL
+@app.post("/users")
+def create_user(name: str):
+    return asdict(users.create(name=name)[0])
+
+@app.get("/users")
+def list_users(page: int = 1):
+    return [asdict(u) for u in users.read(page=page)]
+```
+
+### Internal Tools
+
+Admin panels, data entry, batch processing.
+
+```python
+@dataclass
+class Customer(Model):
+    company: str = ""
+    contact: str = ""
+    notes: str = ""
+    tags: list | None = None
+
+customers = SQL("crm.db")(Customer)
+customers.read(page=1, per_page=50)
+```
+
+### Per-Tenant Databases
+
+Each customer gets their own SQLite file.
+
+```python
+def get_db(tenant_id: str):
+    return SQL(f"data/{tenant_id}.db")
+
+db = get_db("acme-corp")
+projects = db(Project)
+```
+
+### Embedded & Edge
+
+IoT devices, Raspberry Pi, edge computing.
+
+```python
+@dataclass
+class SensorReading(Model):
+    device_id: str = ""
+    temperature: float = 0.0
+    humidity: float = 0.0
+
+readings = SQL("/var/lib/sensors/data.db")(SensorReading)
+readings.create(device_id="sensor-1", temperature=22.5, humidity=45.0)
+```
+
+### Test Fixtures
+
+Easy setup and teardown for tests.
+
+```python
+@pytest.fixture
+def db():
+    db = SQL(":memory:")
+    users = db(User)
+    users.create({"name": "Alice"}, {"name": "Bob"})
+    yield users
+    # SQLite in-memory DB auto-cleans
+```
+
+### Audit Logs & Event Sourcing
+
+Track changes with timestamps built-in.
+
+```python
+@dataclass
+class AuditLog(Model):
+    user_id: str = ""
+    action: str = ""
+    resource: str = ""
+    details: dict | None = None
+
+logs = SQL("audit.db")(AuditLog)
+logs.create(user_id=user.id, action="delete", resource="project:123")
+# created_at automatically set
+```
+
+### Configuration Storage
+
+Replace JSON config files with queryable storage.
+
+```python
+@dataclass
+class Setting(Model):
+    key: str = ""
+    value: str = ""
+    scope: str = "global"
+
+settings = SQL("config.db")(Setting)
+settings.create(key="theme", value="dark", scope="user:123")
+settings.read(scope="user:123")
+```
+
+### Caching Layer
+
+Local cache for remote API data.
+
+```python
+@dataclass
+class CachedResponse(Model):
+    url: str = ""
+    data: dict | None = None
+    expires_at: str = ""
+
+cache = SQL("cache.db")(CachedResponse)
+
+def fetch(url: str):
+    cached = cache.read(url=url)
+    if cached and cached[0].expires_at > now():
+        return cached[0].data
+    # fetch from remote, cache result
+```
+
+## License
+
+MIT
