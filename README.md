@@ -138,17 +138,17 @@ posts = db(Post)
 
 ### Type Support
 
-| Python Type | SQLite Type | Notes              |
-| ----------- | ----------- | ------------------ |
-| `str`       | TEXT        |                    |
-| `int`       | INTEGER     |                    |
-| `float`     | REAL        |                    |
-| `bool`      | INTEGER     | Stored as 0/1      |
-| `dict`      | TEXT        | JSON serialized    |
-| `list`      | TEXT        | JSON serialized    |
-| `datetime`  | TEXT        | ISO format, UTC    |
-| `date`      | TEXT        | ISO format         |
-| `time`      | TEXT        | ISO format         |
+| Python Type | SQLite Type | Notes           |
+| ----------- | ----------- | --------------- |
+| `str`       | TEXT        |                 |
+| `int`       | INTEGER     |                 |
+| `float`     | REAL        |                 |
+| `bool`      | INTEGER     | Stored as 0/1   |
+| `dict`      | TEXT        | JSON serialized |
+| `list`      | TEXT        | JSON serialized |
+| `datetime`  | TEXT        | ISO format, UTC |
+| `date`      | TEXT        | ISO format      |
+| `time`      | TEXT        | ISO format      |
 
 ### Datetime Support
 
