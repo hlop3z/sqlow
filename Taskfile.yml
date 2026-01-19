@@ -1,0 +1,73 @@
+version: "3"
+
+vars:
+  SRC: src/sqlow
+  TESTS: tests/
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # Development
+  install:
+    desc: Install all dependencies
+    cmds:
+      - uv sync --all-extras
+
+  # Formatting
+  fmt:
+    desc: Format code with black and isort
+    cmds:
+      - uv run black {{.SRC}}
+      - uv run isort {{.SRC}}
+
+  fmt:check:
+    desc: Check code formatting
+    cmds:
+      - uv run black --check {{.SRC}}
+      - uv run isort --check-only {{.SRC}}
+
+  # Linting
+  lint:
+    desc: Run mypy type checker (strict)
+    cmds:
+      - uv run mypy --strict {{.SRC}}
+
+  # Testing
+  test:
+    desc: Run all tests
+    cmds:
+      - uv run pytest {{.TESTS}} -v --tb=short
+
+  test:cov:
+    desc: Run tests with coverage
+    cmds:
+      - uv run pytest {{.TESTS}} -v --cov=sqlow --cov-report=term-missing --cov-fail-under=100
+
+  # CI
+  ci:
+    desc: Run full CI pipeline (format check, lint, test)
+    cmds:
+      - task: fmt:check
+      - task: lint
+      - task: test:cov
+
+  # Clean
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov dist build *.egg-info
+      - rm -f coverage.xml .coverage *.db *.sqlite3
+
+  # Build & Release
+  build:
+    desc: Build package
+    cmds:
+      - uv build
+
+  publish:
+    desc: Publish to PyPI (requires PYPI_TOKEN)
+    cmds:
+      - uv publish

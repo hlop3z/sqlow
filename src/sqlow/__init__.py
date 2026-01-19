@@ -299,7 +299,9 @@ class Table[T]:
         self._soft_delete = _has_soft_delete(cls)
         self._create_table()
 
-    def _sql(self, sql: str, params: tuple[Any, ...] = ()) -> tuple[list[sqlite3.Row], int]:
+    def _sql(
+        self, sql: str, params: tuple[Any, ...] = ()
+    ) -> tuple[list[sqlite3.Row], int]:
         """Execute SQL and return results.
 
         Args:
@@ -420,17 +422,25 @@ class Table[T]:
         for item in items:
             if is_dataclass(item) and not isinstance(item, type):
                 records.append(
-                    {f.name: getattr(item, f.name) for f in self._fields if f.name not in AUTO_FIELDS}
+                    {
+                        f.name: getattr(item, f.name)
+                        for f in self._fields
+                        if f.name not in AUTO_FIELDS
+                    }
                 )
             elif isinstance(item, dict):
                 records.append(item)
             else:
-                raise TypeError(f"Expected dict or {self._cls.__name__}, got {type(item)}")
+                raise TypeError(
+                    f"Expected dict or {self._cls.__name__}, got {type(item)}"
+                )
 
         results: list[T] = []
         for record in records:
             # Strip auto fields from input
-            row = self._to_row(**{k: v for k, v in record.items() if k not in AUTO_FIELDS})
+            row = self._to_row(
+                **{k: v for k, v in record.items() if k not in AUTO_FIELDS}
+            )
             # Set auto fields
             row["id"] = str(uuid.uuid4())
             if "created_at" in self._field_map:
@@ -444,7 +454,9 @@ class Table[T]:
             self._sql(sql, tuple(row.values()))
 
             # Fetch inserted row
-            rows, _ = self._sql(f"SELECT * FROM {self._table} WHERE id = ?", (row["id"],))
+            rows, _ = self._sql(
+                f"SELECT * FROM {self._table} WHERE id = ?", (row["id"],)
+            )
             if rows:
                 results.append(self._from_row(rows[0]))
 
@@ -531,7 +543,9 @@ class Table[T]:
             elif isinstance(item, dict):
                 records.append(item)
             else:
-                raise TypeError(f"Expected dict or {self._cls.__name__}, got {type(item)}")
+                raise TypeError(
+                    f"Expected dict or {self._cls.__name__}, got {type(item)}"
+                )
 
         results: list[T] = []
         for record in records:
@@ -540,11 +554,17 @@ class Table[T]:
 
             item_id = record["id"]
             # Exclude auto fields except updated_at
-            update_data = {k: v for k, v in record.items() if k not in {"id", "created_at", "deleted_at"}}
+            update_data = {
+                k: v
+                for k, v in record.items()
+                if k not in {"id", "created_at", "deleted_at"}
+            }
             if not update_data and "updated_at" not in self._field_map:
                 continue
 
-            row = self._to_row(**{k: v for k, v in update_data.items() if k != "updated_at"})
+            row = self._to_row(
+                **{k: v for k, v in update_data.items() if k != "updated_at"}
+            )
             # Auto-update timestamp
             if "updated_at" in self._field_map:
                 row["updated_at"] = _now()
@@ -563,7 +583,9 @@ class Table[T]:
 
         return results
 
-    def delete(self, *items: dict[str, Any] | T, hard: bool = False, **kwargs: Any) -> list[T]:
+    def delete(
+        self, *items: dict[str, Any] | T, hard: bool = False, **kwargs: Any
+    ) -> list[T]:
         """Delete records from the table.
 
         Uses soft delete by default (sets deleted_at timestamp).
@@ -600,7 +622,9 @@ class Table[T]:
             elif isinstance(item, dict):
                 records.append(item)
             else:
-                raise TypeError(f"Expected dict or {self._cls.__name__}, got {type(item)}")
+                raise TypeError(
+                    f"Expected dict or {self._cls.__name__}, got {type(item)}"
+                )
 
         # If batch mode (records provided), delete each by its filter
         if records:
@@ -689,20 +713,28 @@ class SQL:
 
     Create tables by calling the instance with a dataclass.
 
+    Args:
+        path: Path to SQLite database file. Use ":memory:" for in-memory DB.
+
     Example:
-        db = SQL("app.db")
-
-        @dataclass
-        class Component(Model):
-            name: str = ""
-
-        components = db(Component)
-        components.create(name="button")
+        >>> db = SQL("app.db")
+        >>> @dataclass
+        ... class User(Model):
+        ...     name: str = ""
+        >>> users = db(User)
+        >>> users.create(name="Alice")
     """
 
     def __init__(self, path: str):
         self.path = path
 
     def __call__(self, cls: type[T]) -> Table[T]:
-        """Create a table for the given dataclass."""
+        """Create a table for the given dataclass.
+
+        Args:
+            cls: Dataclass type to create table for.
+
+        Returns:
+            Table instance for CRUD operations.
+        """
         return Table(self, cls)

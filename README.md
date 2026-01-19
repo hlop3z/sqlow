@@ -1,5 +1,11 @@
 # SQLow
 
+[![PyPI](https://img.shields.io/pypi/v/sqlow)](https://pypi.org/project/sqlow/)
+[![Python](https://img.shields.io/pypi/pyversions/sqlow)](https://pypi.org/project/sqlow/)
+[![Tests](https://github.com/hlop3z/sqlow/actions/workflows/test.yml/badge.svg)](https://github.com/hlop3z/sqlow/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/hlop3z/sqlow/graph/badge.svg)](https://codecov.io/gh/hlop3z/sqlow)
+[![License](https://img.shields.io/pypi/l/sqlow)](https://github.com/hlop3z/sqlow/blob/main/LICENSE)
+
 Dataclass-native SQLite. Zero boilerplate CRUD.
 
 ```python
