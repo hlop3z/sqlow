@@ -34,7 +34,7 @@ pip install sqlow
 - **100% typed** - Full type hints, mypy strict compatible
 - **100% tested** - Complete test coverage
 - **Standard library only** - No dependencies beyond Python
-- **JSON-friendly** - Returns dataclass instances (easy `asdict()` for JSON)
+- **JSON-friendly** - Returns dataclass instances (easy `to_dict()` and `from_dict()` for JSON)
 
 ## API
 
