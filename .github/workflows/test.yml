@@ -1,17 +1,32 @@
 name: Tests
 
+# Only files that can change the test outcome trigger a run
 on:
   push:
     branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/test.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/test.yml"
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        # Oldest supported and newest: 3.12 exercises the _uuid7 fallback,
+        # 3.14 exercises stdlib uuid.uuid7
+        python-version: ["3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
