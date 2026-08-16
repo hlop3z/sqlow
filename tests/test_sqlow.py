@@ -191,6 +191,12 @@ class TestCreate:
         assert result[0].name == "button"
         assert result[0].count == 5
 
+    def test_create_nothing_returns_empty(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+
+        assert items.create() == []
+
     def test_create_single_with_dict(self):
         db = SQL(TEST_DB)
         items = db(Item)
@@ -1004,6 +1010,38 @@ class TestUuid7:
 
         assert len({c.id for c in created}) == 500
 
+    def test_fallback_generator_is_uuid7(self):
+        """The pre-3.14 fallback must produce a valid, current UUIDv7.
+
+        On 3.14+ ids come from stdlib ``uuid.uuid7``, so the fallback is
+        exercised directly to keep it tested on every supported version.
+        """
+        from time import time_ns
+
+        from sqlow import _uuid7
+
+        generated = _uuid7()
+
+        assert generated.version == 7
+        assert generated.variant == uuid.RFC_4122
+        # The 48-bit prefix is the unix timestamp in milliseconds
+        assert abs((generated.int >> 80) - time_ns() // 1_000_000) < 5_000
+
+
+class TestUnresolvableAnnotations:
+    """Annotations that cannot resolve fall back to the raw string -> TEXT."""
+
+    def test_unresolvable_forward_reference_falls_back(self):
+        @dataclass
+        class Ghost(Model):
+            blob: "Undefined" = None  # type: ignore[name-defined] # noqa: F821
+
+        db = SQL(TEST_DB)
+        table = db(Ghost)
+
+        assert table._field_map["blob"].sql_type == "TEXT"
+        assert table.create(blob="raw")[0].blob == "raw"
+
 
 class TestStrict:
     """New tables are STRICT, so declared types are enforced."""
@@ -1042,6 +1080,19 @@ class TestTransactions:
 
         assert len(created) == 50
         assert items.count().total == 50
+
+    def test_executemany_commits_outside_transaction(self):
+        """Direct executemany() with no open transaction must commit itself."""
+        db = SQL(TEST_DB)
+        db(Item)  # create the table
+        db.executemany(
+            'INSERT INTO "item" (id, name) VALUES (?, ?)',
+            [("a", "x"), ("b", "y")],
+        )
+        db.close()
+
+        # A fresh connection only sees the rows if the commit happened
+        assert {i.id for i in SQL(TEST_DB)(Item).read()} == {"a", "b"}
 
 
 class TestTableCache:
