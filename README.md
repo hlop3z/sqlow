@@ -5,7 +5,7 @@
 [![codecov](https://codecov.io/gh/hlop3z/sqlow/graph/badge.svg)](https://codecov.io/gh/hlop3z/sqlow)
 [![License](https://img.shields.io/pypi/l/sqlow)](https://github.com/hlop3z/sqlow/blob/main/LICENSE)
 
-Dataclass-native SQLite. Zero boilerplate CRUD.
+Dataclass-native SQLite. **JSON-file experience with database-grade durability**.
 
 ```python
 from dataclasses import dataclass
@@ -28,13 +28,31 @@ tasks.create(title="Build something")
 pip install sqlow
 ```
 
+Requires Python 3.12+. No dependencies.
+
 ## Why SQLow?
+
+SQLow replaces the JSON or pickle file, not your database layer. When a script
+or app has record-shaped data, you define a dataclass and get durable, typed
+storage — without writing any persistence code.
 
 - **Zero boilerplate** - Define a dataclass, get a database
 - **100% typed** - Full type hints, mypy strict compatible
 - **100% tested** - Complete test coverage
 - **Standard library only** - No dependencies beyond Python
 - **JSON-friendly** - Returns dataclass instances (easy `to_dict()` and `from_dict()` for JSON)
+
+## When to Use Something Else
+
+SQLow is deliberately small: everything it has hardens the small case, and
+everything it lacks is what the large cases need. Reach for an ORM
+([SQLAlchemy](https://www.sqlalchemy.org/), [SQLModel](https://sqlmodel.tiangolo.com/),
+[peewee](https://docs.peewee-orm.com/)) or raw `sqlite3` when you need:
+
+- **Relations** - There are no joins and no enforced foreign keys
+- **Rich queries** - Filters are equality-only: no ranges, `LIKE`, aggregates, or custom ordering
+- **Schema migrations** - Adding a field to a dataclass does not alter an existing table
+- **Multi-process or server workloads** - One connection per instance, serialized by a lock
 
 ## API
 
@@ -75,6 +93,9 @@ users.read(id="abc-123")        # by id
 users.read(name="Alice")        # by field
 users.read(page=1, per_page=10) # paginated
 
+# Filters match by equality only; multiple filters AND together.
+# For anything richer, drop down to raw SQL via db.execute().
+
 # Update
 users.update(id="abc-123", name="Alicia")
 users.update({"id": "a", "name": "A"}, {"id": "b", "name": "B"})  # batch
@@ -89,12 +110,12 @@ users.delete({"id": "a"}, {"id": "b"})  # batch delete
 
 When you inherit from `Model`, these fields are auto-managed:
 
-| Field        | Type          | Behavior                       |
-| ------------ | ------------- | ------------------------------ |
-| `id`         | `str`         | UUID, auto-generated on create |
-| `created_at` | `str`         | ISO timestamp, set on create   |
-| `updated_at` | `str`         | ISO timestamp, set on update   |
-| `deleted_at` | `str \| None` | ISO timestamp, set on delete   |
+| Field        | Type          | Behavior                                |
+| ------------ | ------------- | --------------------------------------- |
+| `id`         | `str`         | UUIDv7, auto-generated on create        |
+| `created_at` | `str`         | ISO timestamp, set on create            |
+| `updated_at` | `str`         | ISO timestamp, set on create and update |
+| `deleted_at` | `str \| None` | ISO timestamp, set on soft delete       |
 
 ### Pagination
 
@@ -189,7 +210,80 @@ json.dumps([u.to_dict() for u in data])  # datetime -> ISO string
 user = User.from_dict({"name": "Alice", "starts_at": "2024-06-15T10:30:00+00:00"})
 ```
 
+### Connections
+
+`SQL` opens one connection on first use and reuses it, so `":memory:"` databases
+persist for the lifetime of the instance. Access is serialized with a lock, so a
+single instance can be shared across threads.
+
+The connection is released when the instance is garbage collected. Close it
+explicitly when you need the file handle freed at a known point:
+
+```python
+db = SQL("app.db")
+db.close()
+
+# Or as a context manager
+with SQL("app.db") as db:
+    users = db(User)
+    users.create(name="Alice")
+```
+
+File databases run in [WAL mode](https://sqlite.org/wal.html) with
+`synchronous=NORMAL`, so readers never block the writer. WAL keeps `app.db-wal`
+and `app.db-shm` beside the database; both are removed on a clean close. Delete
+them along with the database if you remove it by hand.
+
+### IDs
+
+Primary keys are [UUID version 7](https://www.rfc-editor.org/rfc/rfc9562#name-uuid-version-7)
+strings: a millisecond timestamp followed by random bits. Unlike random UUIDv4
+keys, they are generated in ascending order, which keeps index inserts
+sequential and makes `ORDER BY id` chronological.
+
+```python
+users.create(name="Alice")   # id="01a00c5b-e413-77b6-8051-481b36527d64"
+
+# Newest last, no extra column needed
+for u in sorted(users.read(), key=lambda u: u.id):
+    ...
+```
+
+`uuid.uuid7()` is used on Python 3.14+; older versions use an equivalent
+built-in implementation, so there are still no dependencies.
+
+### Batching
+
+Each call to `create`, `update`, or `delete` runs as a single transaction —
+one commit no matter how many records it touches. Pass records together rather
+than looping, and the whole batch either lands or rolls back:
+
+```python
+# One transaction, one commit
+users.create(*[{"name": f"user{i}"} for i in range(1000)])
+
+# A loop is 1000 transactions - much slower
+for i in range(1000):
+    users.create(name=f"user{i}")
+```
+
+### Type Enforcement
+
+New tables are created as [STRICT](https://sqlite.org/stricttables.html), so
+values that do not match the declared type are rejected instead of silently
+stored. Lossless conversions still apply.
+
+```python
+users.create(name="Alice", age="42")     # ok, converted to 42
+users.create(name="Alice", age="forty")  # sqlite3.IntegrityError
+```
+
+Tables created before this version keep their original non-STRICT schema; no
+migration is performed.
+
 ## Use Cases
+
+All the places you would otherwise reach for a JSON file:
 
 ### CLI Tools & Scripts
 
@@ -217,21 +311,6 @@ class Note(Model):
     folder_id: str = ""
 
 notes = SQL("~/.myapp/notes.db")(Note)
-```
-
-### Prototyping & MVPs
-
-Get a working backend in minutes. Migrate to Postgres later.
-
-```python
-# Flask + SQL
-@app.post("/users")
-def create_user(name: str):
-    return asdict(users.create(name=name)[0])
-
-@app.get("/users")
-def list_users(page: int = 1):
-    return [asdict(u) for u in users.read(page=page)]
 ```
 
 ### Internal Tools
@@ -289,23 +368,6 @@ def db():
     users.create({"name": "Alice"}, {"name": "Bob"})
     yield users
     # SQLite in-memory DB auto-cleans
-```
-
-### Audit Logs & Event Sourcing
-
-Track changes with timestamps built-in.
-
-```python
-@dataclass
-class AuditLog(Model):
-    user_id: str = ""
-    action: str = ""
-    resource: str = ""
-    details: dict | None = None
-
-logs = SQL("audit.db")(AuditLog)
-logs.create(user_id=user.id, action="delete", resource="project:123")
-# created_at automatically set
 ```
 
 ### Configuration Storage

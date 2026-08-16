@@ -2,12 +2,14 @@
 
 import json
 import os
-import pytest
+import sqlite3
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, date, time, timezone
+from datetime import UTC, date, datetime, time
 
-from sqlow import SQL, Model, Count
+import pytest
 
+from sqlow import SQL, Count, Model
 
 # Test fixtures
 TEST_DB = "test_sqlow.sqlite3"
@@ -46,14 +48,20 @@ class Event(Model):
     event_time: time | None = None
 
 
+def _remove_db():
+    """Remove the database and its WAL sidecar files."""
+    for suffix in ("", "-wal", "-shm"):
+        path = TEST_DB + suffix
+        if os.path.exists(path):
+            os.remove(path)
+
+
 @pytest.fixture(autouse=True)
 def cleanup():
     """Clean up test database before and after each test."""
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
+    _remove_db()
     yield
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
+    _remove_db()
 
 
 class TestModel:
@@ -86,6 +94,7 @@ class TestModel:
 
         # Small delay to ensure timestamp differs
         import time
+
         time.sleep(0.01)
 
         updated = items.update(id=added[0].id, name="changed")
@@ -322,7 +331,9 @@ class TestUpdate:
         db = SQL(TEST_DB)
         items = db(Item)
         added = items.create({"name": "a"}, {"name": "b"})
-        result = items.update({"id": added[0].id, "name": "x"}, {"id": added[1].id, "name": "y"})
+        result = items.update(
+            {"id": added[0].id, "name": "x"}, {"id": added[1].id, "name": "y"}
+        )
 
         assert len(result) == 2
         assert result[0].name == "x"
@@ -440,7 +451,9 @@ class TestPagination:
     def test_read_with_page(self):
         db = SQL(TEST_DB)
         items = db(Item)
-        items.create({"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"})
+        items.create(
+            {"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"}
+        )
 
         result = items.read(page=1, per_page=3)
         assert len(result) == 3
@@ -448,7 +461,9 @@ class TestPagination:
     def test_read_pagination(self):
         db = SQL(TEST_DB)
         items = db(Item)
-        items.create({"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"})
+        items.create(
+            {"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"}
+        )
 
         page1 = items.read(page=1, per_page=2)
         page2 = items.read(page=2, per_page=2)
@@ -493,7 +508,11 @@ class TestPagination:
     def test_count_with_filter(self):
         db = SQL(TEST_DB)
         items = db(Item)
-        items.create({"name": "a", "count": 1}, {"name": "b", "count": 2}, {"name": "c", "count": 1})
+        items.create(
+            {"name": "a", "count": 1},
+            {"name": "b", "count": 2},
+            {"name": "c", "count": 1},
+        )
 
         assert items.count(count=1).total == 2
         assert items.count(count=2).total == 1
@@ -645,7 +664,7 @@ class TestDatetime:
     def test_create_with_datetime(self):
         db = SQL(TEST_DB)
         events = db(Event)
-        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
         result = events.create(title="Meeting", starts_at=dt)
 
         assert result[0].starts_at == dt
@@ -655,12 +674,13 @@ class TestDatetime:
         """Naive datetime is treated as UTC."""
         db = SQL(TEST_DB)
         events = db(Event)
-        naive_dt = datetime(2024, 6, 15, 10, 30, 0)  # no timezone
+        # The missing tzinfo is the point of this test
+        naive_dt = datetime(2024, 6, 15, 10, 30, 0)  # noqa: DTZ001
         result = events.create(title="Meeting", starts_at=naive_dt)
 
         # Should be stored and returned as UTC
-        assert result[0].starts_at.tzinfo == timezone.utc
-        assert result[0].starts_at == datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        assert result[0].starts_at.tzinfo == UTC
+        assert result[0].starts_at == datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
 
     def test_create_with_date(self):
         db = SQL(TEST_DB)
@@ -683,11 +703,13 @@ class TestDatetime:
     def test_read_preserves_datetime_types(self):
         db = SQL(TEST_DB)
         events = db(Event)
-        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
         d = date(2024, 6, 15)
         t = time(10, 30, 0)
 
-        added = events.create(title="Full event", starts_at=dt, event_date=d, event_time=t)
+        added = events.create(
+            title="Full event", starts_at=dt, event_date=d, event_time=t
+        )
         result = events.read(id=added[0].id)
 
         assert result[0].starts_at == dt
@@ -697,8 +719,8 @@ class TestDatetime:
     def test_update_datetime(self):
         db = SQL(TEST_DB)
         events = db(Event)
-        dt1 = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
-        dt2 = datetime(2024, 7, 20, 14, 0, 0, tzinfo=timezone.utc)
+        dt1 = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
+        dt2 = datetime(2024, 7, 20, 14, 0, 0, tzinfo=UTC)
 
         added = events.create(title="Meeting", starts_at=dt1)
         updated = events.update(id=added[0].id, starts_at=dt2)
@@ -708,7 +730,7 @@ class TestDatetime:
     def test_filter_by_datetime(self):
         db = SQL(TEST_DB)
         events = db(Event)
-        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
         events.create(title="Meeting", starts_at=dt)
 
         result = events.read(starts_at=dt)
@@ -735,14 +757,20 @@ class TestDatetime:
         conn = sqlite3.connect(TEST_DB)
         conn.execute(
             "INSERT INTO event (id, title, starts_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ("test-id", "Legacy", "2024-06-15T10:30:00", "2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+00:00"),
+            (
+                "test-id",
+                "Legacy",
+                "2024-06-15T10:30:00",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+            ),
         )
         conn.commit()
         conn.close()
 
         # Read back - should be UTC
         result = events.read(id="test-id")
-        assert result[0].starts_at.tzinfo == timezone.utc
+        assert result[0].starts_at.tzinfo == UTC
 
 
 class TestToDict:
@@ -762,7 +790,7 @@ class TestToDict:
     def test_to_dict_with_datetime(self):
         db = SQL(TEST_DB)
         events = db(Event)
-        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
         result = events.create(title="Meeting", starts_at=dt)
 
         d = result[0].to_dict()
@@ -790,7 +818,7 @@ class TestToDict:
     def test_to_dict_json_serializable(self):
         db = SQL(TEST_DB)
         events = db(Event)
-        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
         d = date(2024, 6, 15)
         t = time(10, 30, 0)
 
@@ -824,46 +852,35 @@ class TestFromDict:
         assert item.count == 5
 
     def test_from_dict_with_datetime(self):
-        event = Event.from_dict({
-            "title": "Meeting",
-            "starts_at": "2024-06-15T10:30:00+00:00"
-        })
+        event = Event.from_dict(
+            {"title": "Meeting", "starts_at": "2024-06-15T10:30:00+00:00"}
+        )
 
         assert event.title == "Meeting"
         assert isinstance(event.starts_at, datetime)
-        assert event.starts_at == datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        assert event.starts_at == datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
 
     def test_from_dict_datetime_naive_becomes_utc(self):
-        event = Event.from_dict({
-            "title": "Meeting",
-            "starts_at": "2024-06-15T10:30:00"  # no timezone
-        })
+        event = Event.from_dict(
+            {"title": "Meeting", "starts_at": "2024-06-15T10:30:00"}  # no timezone
+        )
 
-        assert event.starts_at.tzinfo == timezone.utc
+        assert event.starts_at.tzinfo == UTC
 
     def test_from_dict_with_date(self):
-        event = Event.from_dict({
-            "title": "Holiday",
-            "event_date": "2024-06-15"
-        })
+        event = Event.from_dict({"title": "Holiday", "event_date": "2024-06-15"})
 
         assert isinstance(event.event_date, date)
         assert event.event_date == date(2024, 6, 15)
 
     def test_from_dict_with_time(self):
-        event = Event.from_dict({
-            "title": "Standup",
-            "event_time": "10:30:00"
-        })
+        event = Event.from_dict({"title": "Standup", "event_time": "10:30:00"})
 
         assert isinstance(event.event_time, time)
         assert event.event_time == time(10, 30, 0)
 
     def test_from_dict_null_values(self):
-        event = Event.from_dict({
-            "title": "No date",
-            "starts_at": None
-        })
+        event = Event.from_dict({"title": "No date", "starts_at": None})
 
         assert event.starts_at is None
 
@@ -878,11 +895,13 @@ class TestFromDict:
         """to_dict -> from_dict should preserve data."""
         db = SQL(TEST_DB)
         events = db(Event)
-        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 10, 30, 0, tzinfo=UTC)
         d = date(2024, 6, 15)
         t = time(10, 30, 0)
 
-        original = events.create(title="Event", starts_at=dt, event_date=d, event_time=t)[0]
+        original = events.create(
+            title="Event", starts_at=dt, event_date=d, event_time=t
+        )[0]
 
         # Roundtrip
         data = original.to_dict()
@@ -892,3 +911,160 @@ class TestFromDict:
         assert restored.starts_at == original.starts_at
         assert restored.event_date == original.event_date
         assert restored.event_time == original.event_time
+
+
+@dataclass
+class Reserved(Model):
+    """Model whose fields collide with SQL reserved words."""
+
+    order: int = 0
+    group: str = ""
+    where: str = ""
+
+
+class TestReservedWords:
+    """Field names that are SQL keywords must still work."""
+
+    def test_crud_with_reserved_field_names(self):
+        db = SQL(TEST_DB)
+        table = db(Reserved)
+
+        created = table.create(order=1, group="a", where="x")
+        assert created[0].order == 1
+
+        assert len(table.read(group="a")) == 1
+        assert table.count(group="a").total == 1
+
+        updated = table.update(id=created[0].id, order=2)
+        assert updated[0].order == 2
+
+        assert len(table.delete(id=created[0].id)) == 1
+        assert table.read() == []
+
+
+class TestInMemory:
+    """An in-memory database must persist across statements."""
+
+    def test_memory_db_persists_between_calls(self):
+        db = SQL(":memory:")
+        items = db(Item)
+
+        items.create(name="a")
+        items.create(name="b")
+
+        assert items.count().total == 2
+        assert {i.name for i in items.read()} == {"a", "b"}
+
+    def test_memory_dbs_are_isolated(self):
+        first = SQL(":memory:")(Item)
+        second = SQL(":memory:")(Item)
+
+        first.create(name="only-in-first")
+
+        assert first.count().total == 1
+        assert second.count().total == 0
+
+    def test_context_manager_closes(self):
+        with SQL(TEST_DB) as db:
+            items = db(Item)
+            items.create(name="a")
+            assert items.count().total == 1
+
+        assert db._conn is None
+
+
+class TestUuid7:
+    """IDs are UUID version 7: time-ordered and k-sortable."""
+
+    def test_id_is_uuid7(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+        created = items.create(name="a")
+
+        parsed = uuid.UUID(created[0].id)
+        assert parsed.version == 7
+
+    def test_ids_sort_chronologically(self):
+        import time as clock  # datetime.time shadows the module here
+
+        db = SQL(TEST_DB)
+        items = db(Item)
+
+        ids = []
+        for i in range(5):
+            ids.append(items.create(name=f"n{i}")[0].id)
+            clock.sleep(0.002)  # cross a millisecond boundary
+
+        assert ids == sorted(ids)
+
+    def test_ids_unique(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+        created = items.create(*[{"name": f"n{i}"} for i in range(500)])
+
+        assert len({c.id for c in created}) == 500
+
+
+class TestStrict:
+    """New tables are STRICT, so declared types are enforced."""
+
+    def test_wrong_type_rejected(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            items.create(name="x", count="not-a-number")
+
+    def test_lossless_conversion_still_allowed(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+
+        assert items.create(name="x", count="123")[0].count == 123
+
+
+class TestTransactions:
+    """Each operation commits once, and rolls back as a unit."""
+
+    def test_failed_batch_rolls_back(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            items.create({"name": "ok"}, {"name": "bad", "count": "nope"})
+
+        # The first record must not survive the failed batch
+        assert items.read() == []
+
+    def test_batch_create_is_one_commit(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+        created = items.create(*[{"name": f"n{i}"} for i in range(50)])
+
+        assert len(created) == 50
+        assert items.count().total == 50
+
+
+class TestTableCache:
+    """db(cls) reuses the Table instead of re-running CREATE TABLE."""
+
+    def test_same_instance_returned(self):
+        db = SQL(TEST_DB)
+
+        assert db(Item) is db(Item)
+
+    def test_drop_evicts_cache(self):
+        db = SQL(TEST_DB)
+        items = db(Item)
+        items.create(name="a")
+        items.drop()
+
+        # A fresh Table must recreate the dropped table
+        assert db(Item).read() == []
+
+
+class TestPragmas:
+    def test_wal_enabled_for_file_db(self):
+        db = SQL(TEST_DB)
+        db(Item).create(name="a")
+
+        assert db.execute("PRAGMA journal_mode")[0][0].lower() == "wal"

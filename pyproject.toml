@@ -1,8 +1,10 @@
 [project]
 name = "sqlow"
-version = "0.2.0"
-description = "Dataclass-native SQLite."
+version = "0.3.0"
+description = "SQLite for dataclasses. JSON-file simplicity, typed records, zero boilerplate. No ORM. No migrations. Stdlib only."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "hlop3z", email = "23062270+hlop3z@users.noreply.github.com" },
 ]
@@ -16,7 +18,13 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     # Dev Tools
-    "mypy>=1.19.1",
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
+    # Lint
+    "black>=26.3.1",
+    "isort>=8.0.1",
+    "mypy>=2.0.0",
+    "pylint>=4.0.5",
+    "ruff>=0.15.12",
+    "ssort>=0.16.0",
 ]
