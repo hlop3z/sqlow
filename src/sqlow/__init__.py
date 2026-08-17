@@ -23,6 +23,9 @@ Usage:
     components.read(id="abc-123")                # -> [Component(...)] or []
     components.update(id="abc-123", name="new")  # -> [Component(...)]
     components.delete(id="abc-123")              # -> [Component(...)]
+
+    db.dump("seed.json", Component, Project)     # fixtures out
+    db.load("seed.json", Component, Project)     # and back in
 """
 
 from __future__ import annotations
@@ -33,15 +36,40 @@ import sqlite3
 import threading
 import uuid
 import weakref
-from collections.abc import Callable, Generator, MutableMapping
+from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, date, datetime, time
 from itertools import batched
 from time import time_ns
-from typing import Any, Final, Self, get_origin, get_type_hints
+from types import NoneType, UnionType
+from typing import (
+    Any,
+    Final,
+    Literal,
+    Self,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
-__all__ = ["SQL", "Count", "Model", "Table"]
+__all__ = ["SQL", "Count", "Fixtures", "Model", "Synchronous", "Table"]
+
+type Fixtures = str | os.PathLike[str] | Iterable[Mapping[str, Any]]
+"""What ``load()`` accepts: a path to a JSON fixture file, or the records
+themselves as an iterable of mappings (what ``dump()`` returns)."""
+
+type Synchronous = Literal["OFF", "NORMAL", "FULL", "EXTRA"]
+"""Durability levels for ``SQL(synchronous=...)``, in increasing order of cost.
+
+- ``"OFF"``: no syncing. Fastest, and a crash can corrupt the database.
+- ``"NORMAL"``: commits survive a process crash, but the most recent ones can
+  roll back on an OS crash or power loss. The default.
+- ``"FULL"``: one fsync per commit. Nothing acknowledged is lost.
+- ``"EXTRA"``: ``"FULL"`` plus a directory sync on journal changes.
+"""
 
 # Type mapping: Python -> SQLite
 TYPE_MAP: Final[dict[type, str]] = {
@@ -59,27 +87,67 @@ TYPE_MAP: Final[dict[type, str]] = {
 # Auto-managed fields, owned by the library and never written from user input
 AUTO_FIELDS: Final = frozenset({"id", "created_at", "updated_at", "deleted_at"})
 
+# Accepted PRAGMA synchronous levels, derived from the annotation so the type
+# and the runtime check cannot drift apart. A pragma value cannot be bound as a
+# parameter, so the level is checked against this set before interpolation.
+SYNC_LEVELS: Final[frozenset[str]] = frozenset(
+    get_args(Synchronous.__value__)  # pylint: disable=no-member
+)
+
 # Rows per statement in batched IN-clause queries. Old SQLite builds cap bound
 # parameters at 999 (SQLITE_MAX_VARIABLE_NUMBER), so stay under that.
 _BATCH_SIZE: Final = 500
 
 
+# Monotonic counter state for _uuid7. A plain timestamp is only millisecond
+# resolution, so without a counter a burst of inserts inside one millisecond
+# comes out in random order -- which silently breaks the insert ordering that
+# read(after=...) walks and ORDER BY id depend on.
+_UUID7_LOCK: Final = threading.Lock()
+_UUID7_COUNTER_MAX: Final = (1 << 42) - 1
+_uuid7_last_ms = -1
+_uuid7_counter = 0
+
+
 def _uuid7() -> uuid.UUID:
-    """Generate a UUID version 7 (RFC 9562 section 5.7).
+    """Generate a UUID version 7 (RFC 9562 sections 5.7 and 6.2).
 
     Layout, most significant bit first: a 48-bit big-endian Unix timestamp in
-    milliseconds, the 4-bit version, 12 random bits, the 2-bit variant, and 62
-    more random bits.
+    milliseconds, the 4-bit version, a 42-bit counter occupying rand_a and the
+    top of rand_b, the 2-bit variant, and 32 random bits.
+
+    Values are strictly increasing, including within a single millisecond and
+    across a clock that steps backwards. The counter is reseeded randomly each
+    millisecond with its high bit clear, which leaves room for 2**41 ids in one
+    millisecond and keeps successive ids unguessable.
 
     Returns:
-        A time-ordered UUID.
+        A time-ordered UUID, strictly greater than every id returned before it.
     """
-    rand = int.from_bytes(os.urandom(10), "big")
-    value = (time_ns() // 1_000_000 & 0xFFFF_FFFF_FFFF) << 80  # unix_ts_ms
+    # Process-wide state is the point: monotonicity has to hold across every
+    # caller, so the counter cannot live on an instance
+    global _uuid7_last_ms, _uuid7_counter  # pylint: disable=global-statement
+
+    with _UUID7_LOCK:
+        now_ms = time_ns() // 1_000_000
+        if now_ms > _uuid7_last_ms:
+            _uuid7_last_ms = now_ms
+            _uuid7_counter = int.from_bytes(os.urandom(6), "big") >> 7
+        else:
+            # Same millisecond, or the clock moved backwards: carry on from the
+            # last id rather than emitting one that sorts before it
+            _uuid7_counter += 1
+            if _uuid7_counter > _UUID7_COUNTER_MAX:
+                _uuid7_last_ms += 1
+                _uuid7_counter = int.from_bytes(os.urandom(6), "big") >> 7
+        ts_ms, counter = _uuid7_last_ms, _uuid7_counter
+
+    value = (ts_ms & 0xFFFF_FFFF_FFFF) << 80  # unix_ts_ms
     value |= 0x7 << 76  # ver
-    value |= (rand >> 62 & 0xFFF) << 64  # rand_a
+    value |= (counter >> 30 & 0xFFF) << 64  # rand_a: counter, high 12 bits
     value |= 0b10 << 62  # var
-    value |= rand & (1 << 62) - 1  # rand_b
+    value |= (counter & 0x3FFF_FFFF) << 32  # rand_b: counter, low 30 bits
+    value |= int.from_bytes(os.urandom(4), "big")  # rand_b: 32 random bits
     return uuid.UUID(int=value)
 
 
@@ -107,19 +175,61 @@ def _quote(name: str) -> str:
     return f'"{escaped}"'
 
 
+def _table_name(cls: type) -> str:
+    """Return the table a dataclass maps to.
+
+    Args:
+        cls: Dataclass type.
+
+    Returns:
+        The class name, lowercased.
+    """
+    return cls.__name__.lower()
+
+
+def _sync_level(value: str) -> Synchronous:
+    """Validate and canonicalize a PRAGMA synchronous level.
+
+    Args:
+        value: Level name, in any case.
+
+    Returns:
+        The level, uppercased.
+
+    Raises:
+        ValueError: If the level is not one of SYNC_LEVELS.
+    """
+    level = value.upper()
+    if level not in SYNC_LEVELS:
+        raise ValueError(
+            f"synchronous must be one of {', '.join(sorted(SYNC_LEVELS))}, "
+            f"got {value!r}"
+        )
+    return cast(Synchronous, level)
+
+
 def _unwrap(py_type: Any) -> Any:
-    """Strip Optional/Union wrappers down to the underlying type.
+    """Strip unions and generic parameters down to the type that maps to SQL.
+
+    Parameters carry no storage meaning here -- ``list[str]`` and ``list`` are
+    both a JSON column -- so a subscripted annotation collapses to its origin.
+    Unions are resolved to their first non-None member and unwrapped in turn,
+    which is what makes ``dict[str, Any] | None`` land on ``dict``.
 
     Args:
         py_type: Python type annotation.
 
     Returns:
-        The first non-None member of a union, or py_type unchanged.
+        A bare type suitable for looking up in TYPE_MAP: the origin of a
+        generic, the first non-None member of a union, or py_type unchanged.
     """
-    if get_origin(py_type) is None:
+    origin = get_origin(py_type)
+    if origin is None:
         return py_type
-    args = getattr(py_type, "__args__", ())
-    return next((a for a in args if a is not type(None)), str)
+    if origin is Union or origin is UnionType:
+        return _unwrap(next((a for a in get_args(py_type) if a is not NoneType), str))
+    # list[str] -> list, dict[str, Any] -> dict, Annotated[dict, ...] -> dict
+    return origin
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +355,93 @@ def _decode(info: _FieldInfo, value: Any) -> Any:
     return value
 
 
+def _jsonable(value: Any) -> Any:
+    """Convert a decoded field value into a JSON-serializable one.
+
+    Args:
+        value: A Python value read off a model instance or a decoded row.
+
+    Returns:
+        The value, with datetime/date/time rendered as ISO strings. Everything
+        else is already JSON-native: dict and list fields are decoded objects
+        rather than the TEXT they are stored as.
+    """
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    return value
+
+
+def _read_fixtures(source: Fixtures) -> list[dict[str, Any]]:
+    """Collect fixture records from a JSON file or an in-memory iterable.
+
+    Args:
+        source: Path to a JSON file holding a list of records, or the records
+            themselves.
+
+    Returns:
+        One dict per record, in file order.
+
+    Raises:
+        TypeError: If the file does not hold a JSON list, or a record is not
+            a mapping.
+    """
+    if isinstance(source, (str, os.PathLike)):
+        with open(source, encoding="utf-8") as handle:
+            data: Any = json.load(handle)
+        if not isinstance(data, list):
+            raise TypeError(f"{os.fspath(source)} must hold a JSON list of records")
+        items: Iterable[Any] = data
+    else:
+        items = source
+
+    records: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"Expected a fixture record, got {type(item)}")
+        records.append(dict(item))
+    return records
+
+
+def _write_fixtures(
+    path: str | os.PathLike[str], records: list[dict[str, Any]], indent: int | None
+) -> None:
+    """Write fixture records to a JSON file, replacing what is there.
+
+    Args:
+        path: Destination file.
+        records: Records to serialize.
+        indent: Indentation passed to ``json.dump``; None writes one line.
+    """
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(records, handle, indent=indent, ensure_ascii=False)
+        handle.write("\n")
+
+
+def _record_fields(record: dict[str, Any], table: str) -> dict[str, Any]:
+    """Unwrap one fixture record down to its field values.
+
+    Both shapes are accepted: the wrapped ``{"model": ..., "fields": {...}}``
+    that ``dump()`` writes, and a bare dict of field values.
+
+    Args:
+        record: One fixture record.
+        table: Table the record is being loaded into.
+
+    Returns:
+        The record's field values.
+
+    Raises:
+        ValueError: If a wrapped record names a different model.
+    """
+    inner = record.get("fields")
+    model = record.get("model")
+    if isinstance(inner, dict) and isinstance(model, str):
+        if model != table:
+            raise ValueError(f"Record belongs to model {model!r}, not {table!r}")
+        return dict(inner)
+    return record
+
+
 @dataclass(slots=True)
 class Count:
     """Pagination info returned by count().
@@ -292,13 +489,7 @@ class Model:
             >>> user.to_dict()
             {"id": "abc", "name": "Alice", "created_at": "2024-01-01T00:00:00+00:00"}
         """
-        result: dict[str, Any] = {}
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if isinstance(value, (datetime, date, time)):
-                value = value.isoformat()
-            result[f.name] = value
-        return result
+        return {f.name: _jsonable(getattr(self, f.name)) for f in fields(self)}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
@@ -336,11 +527,15 @@ class Table[T]:
     """
 
     def _create_table(self) -> None:
-        """Create table if it does not exist.
+        """Create table if it does not exist, then add any new columns.
 
         New tables are STRICT, so SQLite rejects values that do not match the
         declared column type rather than storing them as-is. Tables created by
         earlier versions keep their original, non-STRICT schema.
+
+        Fields added to the dataclass after the table was created become new
+        nullable columns; existing rows read back None for them. Renames,
+        removals, and type changes are not handled.
         """
         cols = [
             (
@@ -353,6 +548,20 @@ class Table[T]:
         self._db.execute(
             f"CREATE TABLE IF NOT EXISTS {self._quoted} ({', '.join(cols)}) STRICT"
         )
+        existing = {
+            row["name"]
+            for row in self._db.execute(f"PRAGMA table_info({self._quoted})")
+        }
+        for f in self._fields:
+            if f.name not in existing:
+                self._db.execute(
+                    f"ALTER TABLE {self._quoted} "
+                    f"ADD COLUMN {_quote(f.name)} {f.sql_type}"
+                )
+        # No index on deleted_at: it is low-cardinality, and without ANALYZE
+        # statistics SQLite prefers it over the primary key for
+        # "deleted_at IS NULL AND id > ?", which forces a temp B-tree sort and
+        # makes keyset reads ~80x slower. A full scan is the better plan here.
 
     def __init__(self, db: SQL, cls: type[T]):
         if not is_dataclass(cls):
@@ -360,7 +569,7 @@ class Table[T]:
 
         self._db = db
         self._cls = cls
-        self._table = cls.__name__.lower()
+        self._table = _table_name(cls)
         self._quoted = _quote(self._table)
         self._fields = _get_fields(cls)
         self._field_map = {f.name: f for f in self._fields}
@@ -480,8 +689,41 @@ class Table[T]:
                 by_id[row["id"]] = self._from_row(row)
         return [by_id[i] for i in ids if i in by_id]
 
+    def _defaults(self, given: dict[str, Any]) -> dict[str, Any]:
+        """Fill in dataclass defaults for fields the caller left out.
+
+        Every insert is a whole record, so it goes through the dataclass
+        constructor: ``default``, ``default_factory``, and ``__post_init__``
+        then behave exactly as they do anywhere else, and a stored row can
+        never contradict its own annotations with an unasked-for NULL.
+
+        Args:
+            given: Field values supplied by the caller, auto fields removed.
+
+        Returns:
+            Values for every non-auto field on the model.
+
+        Raises:
+            KeyError: If a supplied name is not a field.
+            TypeError: If a field without a default was not supplied.
+        """
+        # Checked before constructing, so an unknown name still raises KeyError
+        # rather than the dataclass's TypeError
+        for name in given:
+            if name not in self._field_map:
+                raise KeyError(f"Unknown field: {name}")
+        instance = self._cls(**given)
+        return {
+            f.name: getattr(instance, f.name)
+            for f in self._fields
+            if f.name not in AUTO_FIELDS
+        }
+
     def create(self, *items: dict[str, Any] | T, **kwargs: Any) -> list[T]:
         """Insert records into the table.
+
+        Omitted fields fall back to the dataclass default rather than NULL, so
+        a created row round-trips as a valid instance of the model.
 
         Args:
             *items: Dicts or dataclass instances to insert.
@@ -491,7 +733,9 @@ class Table[T]:
             List of created items with auto-generated IDs.
 
         Raises:
-            TypeError: If item is not a dict or dataclass instance.
+            KeyError: If a field name is unknown.
+            TypeError: If item is not a dict or dataclass instance, or if the
+                model has a field with no default and it was not supplied.
 
         Example:
             >>> table.create(name="button")
@@ -503,7 +747,9 @@ class Table[T]:
         for record in self._records(items, kwargs):
             # Auto fields are owned by the library, never taken from input
             row = self._to_row(
-                **{k: v for k, v in record.items() if k not in AUTO_FIELDS}
+                **self._defaults(
+                    {k: v for k, v in record.items() if k not in AUTO_FIELDS}
+                )
             )
             row["id"] = str(_new_id())
             for name in ("created_at", "updated_at"):
@@ -534,37 +780,112 @@ class Table[T]:
         include_deleted: bool = False,
         page: int | None = None,
         per_page: int = 10,
+        order_by: str | None = None,
+        after: str | None = None,
         **kwargs: Any,
     ) -> list[T]:
         """Select records from the table.
 
         Excludes soft-deleted records by default.
 
+        Two pagination styles: page= counts rows from the start (simple, but
+        cost grows with the page number), after= seeks past the given id in
+        id order (constant cost at any depth — use it to walk big tables).
+
         Args:
             include_deleted: If True, include soft-deleted records.
             page: Page number (1-indexed) for pagination.
             per_page: Records per page. Defaults to 10.
+            order_by: Field to sort by; prefix with "-" for descending.
+            after: Keyset cursor: return up to per_page rows with id greater
+                than this, in id order. Pass the last id of the previous
+                batch; an empty result means the walk is done.
             **kwargs: Field filters (e.g., name="Alice").
 
         Returns:
             List of matching records, empty list if none found.
 
+        Raises:
+            KeyError: If order_by names an unknown field.
+            ValueError: If after is combined with page, or with an order_by
+                other than "id".
+
         Example:
             >>> table.read()                      # all non-deleted
             >>> table.read(id="abc")              # by id
             >>> table.read(page=1, per_page=20)   # paginated
+            >>> table.read(order_by="-created_at")  # newest first
+            >>> table.read(after=last.id, per_page=500)  # keyset walk
         """
         clause, params = self._where(kwargs, include_deleted)
+
+        # Keyset pagination is pinned to id order; UUIDv7 makes that insert
+        # order, so a walk sees each pre-existing row exactly once.
+        if after is not None:
+            if page is not None:
+                raise ValueError("after and page are mutually exclusive")
+            if order_by not in (None, "id"):
+                raise ValueError("after requires id order")
+            clause += (" AND " if clause else " WHERE ") + "id > ?"
+            params = (*params, after)
+            return [
+                self._from_row(r)
+                for r in self._db.execute(
+                    f"SELECT * FROM {self._quoted}{clause} ORDER BY id LIMIT ?",
+                    (*params, max(1, per_page)),
+                )
+            ]
+
         sql = f"SELECT * FROM {self._quoted}{clause}"
+
+        if order_by is not None:
+            desc = order_by.startswith("-")
+            field = order_by[1:] if desc else order_by
+            if field not in self._field_map:
+                raise KeyError(f"Unknown field: {field}")
+            sql += f" ORDER BY {_quote(field)}{' DESC' if desc else ''}"
 
         # Pagination (1-indexed pages). LIMIT/OFFSET without ORDER BY returns
         # rows in undefined order, so pin it to id: UUIDv7 sorts by insert time.
         if page is not None:
+            if order_by is None:
+                sql += " ORDER BY id"
             per_page = max(1, per_page)
-            sql += " ORDER BY id LIMIT ? OFFSET ?"
+            sql += " LIMIT ? OFFSET ?"
             params = (*params, per_page, (max(1, page) - 1) * per_page)
 
         return [self._from_row(r) for r in self._db.execute(sql, params)]
+
+    def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[T]:
+        """Run raw SQL and decode the rows into model instances.
+
+        The supported escape hatch for everything ``read()`` deliberately does
+        not do -- ranges, ``LIKE``, ``IN``, aggregates, joins, ``GROUP BY``.
+        Nothing is added to the statement, so soft-deleted rows are included
+        unless the query excludes them.
+
+        The projection must cover every field on the model; ``SELECT *`` is the
+        straightforward way to guarantee that.
+
+        Args:
+            sql: A statement returning rows of this table.
+            params: Values bound to the statement's placeholders. Always
+                parameterize user input rather than formatting it into sql.
+
+        Returns:
+            One model instance per row, in the order the query returned them.
+
+        Raises:
+            IndexError: If the projection omits a field of the model.
+
+        Example:
+            >>> table.query(
+            ...     "SELECT * FROM component WHERE name LIKE ? "
+            ...     "AND deleted_at IS NULL ORDER BY created_at DESC",
+            ...     ("btn-%",),
+            ... )
+        """
+        return [self._from_row(row) for row in self._db.execute(sql, params)]
 
     def update(self, *items: dict[str, Any] | T, **kwargs: Any) -> list[T]:
         """Update records by id.
@@ -619,36 +940,51 @@ class Table[T]:
                 )
             return self._fetch_by_ids([item_id for _, item_id in updates])
 
-    def delete(
-        self, *items: dict[str, Any] | T, hard: bool = False, **kwargs: Any
+    # `all` shadows the builtin, but it's the clearest name for the flag
+    def delete(  # pylint: disable=redefined-builtin,too-many-locals
+        self,
+        *items: dict[str, Any] | T,
+        hard: bool = False,
+        all: bool = False,
+        **kwargs: Any,
     ) -> list[T]:
         """Delete records from the table.
 
-        Uses soft delete by default (sets deleted_at timestamp).
+        Uses soft delete by default (sets deleted_at timestamp). Refuses to
+        run with no filters unless all=True is passed explicitly.
 
         Args:
             *items: Dicts or dataclass instances to delete.
             hard: If True, permanently delete instead of soft delete.
+            all: If True, allow deleting every row when no filters are given.
             **kwargs: Field filters for deletion.
 
         Returns:
             List of deleted records.
 
         Raises:
-            ValueError: If dataclass instance has no id.
+            ValueError: If dataclass instance has no id, or if called with no
+                filters and all=False.
             TypeError: If item is not a dict or dataclass instance.
 
         Example:
             >>> table.delete(id="abc")                    # soft delete
             >>> table.delete(id="abc", hard=True)         # permanent
             >>> table.delete({"id": "a"}, {"id": "b"})    # batch
+            >>> table.delete(all=True)                    # every row
         """
         soft = self._soft_delete and not hard
         # Dataclass instances are matched on id alone
         records = self._records(items, kwargs, id_only=True)
 
-        # No filters given: delete every visible row
+        # No filters given: delete every visible row, but only on explicit
+        # all=True — a bare delete() is more likely a bug than an intent
         if not records:
+            if not all:
+                raise ValueError(
+                    "delete() without filters would delete every row; "
+                    "pass all=True to confirm"
+                )
             records = [{}]
 
         results: list[T] = []
@@ -708,11 +1044,133 @@ class Table[T]:
             per_page=per_page,
         )
 
+    def dump(
+        self,
+        path: str | os.PathLike[str] | None = None,
+        *,
+        include_deleted: bool = True,
+        indent: int | None = 2,
+    ) -> list[dict[str, Any]]:
+        """Serialize the table to fixture records.
+
+        Rows come back exactly as stored -- ids, timestamps, and soft-delete
+        tombstones included -- so a dump reloads as the same data rather than
+        as new records. Values are JSON-native: ``dict`` and ``list`` fields
+        are objects, not the TEXT they are stored as, and datetimes are ISO
+        strings, so the file stays readable and hand-editable.
+
+        The whole table is materialized in memory. For tables too large for
+        that, walk them yourself with ``read(after=...)``.
+
+        Args:
+            path: Where to write the JSON file. Omit to only return records.
+            include_deleted: If False, leave soft-deleted rows out.
+            indent: Indentation for the file; None writes it on one line.
+
+        Returns:
+            One ``{"model": ..., "fields": {...}}`` record per row, in id
+            order.
+
+        Example:
+            >>> users.dump("fixtures/users.json")
+            >>> records = users.dump(include_deleted=False)
+        """
+        clause, params = self._where({}, include_deleted)
+        records = [
+            {
+                "model": self._table,
+                "fields": {
+                    f.name: _jsonable(_decode(f, row[f.name])) for f in self._fields
+                },
+            }
+            for row in self._db.execute(
+                f"SELECT * FROM {self._quoted}{clause} ORDER BY id", params
+            )
+        ]
+        if path is not None:
+            _write_fixtures(path, records, indent)
+        return records
+
+    def load(self, source: Fixtures, *, replace: bool = True) -> list[T]:
+        """Insert fixture records into the table.
+
+        The inverse of ``dump()``: auto fields are taken from the fixture
+        instead of being generated, so ids, timestamps, and tombstones survive
+        a dump/load round trip and references between records keep pointing at
+        the right rows. A record that omits them still gets a fresh id and
+        timestamps, which is what makes a hand-written fixture work.
+
+        Records that omit a regular field get the dataclass default, exactly
+        like ``create()``. The whole load is one transaction.
+
+        Args:
+            source: Path to a JSON fixture file, or the records themselves.
+                Both record shapes are accepted: the wrapped
+                ``{"model": ..., "fields": {...}}`` that ``dump()`` writes, and
+                a bare dict of field values.
+            replace: If True, a record whose id already exists overwrites that
+                row. If False, it raises ``sqlite3.IntegrityError`` instead.
+
+        Returns:
+            The loaded records, read back from the table.
+
+        Raises:
+            KeyError: If a record names a field the model does not have.
+            TypeError: If a record is not a mapping, or omits a field that has
+                no default.
+            ValueError: If a wrapped record names a different model.
+
+        Example:
+            >>> users.load("fixtures/users.json")
+            >>> users.load([{"name": "Alice"}, {"name": "Bob"}])
+        """
+        stamp = _now()
+        rows: list[dict[str, Any]] = []
+        for record in _read_fixtures(source):
+            given = _record_fields(record, self._table)
+            # Checked up front so an unknown name raises here rather than as a
+            # confusing TypeError out of the dataclass constructor
+            for name in given:
+                if name not in self._field_map:
+                    raise KeyError(f"Unknown field: {name}")
+            values = {
+                name: _decode(self._field_map[name], value)
+                for name, value in given.items()
+            }
+
+            data = self._defaults(
+                {k: v for k, v in values.items() if k not in AUTO_FIELDS}
+            )
+            data["id"] = values.get("id") or str(_new_id())
+            for name in ("created_at", "updated_at"):
+                if name in self._field_map:
+                    data[name] = values.get(name) or stamp
+            if self._soft_delete:
+                data["deleted_at"] = values.get("deleted_at")
+            rows.append(self._to_row(**data))
+        if not rows:
+            return []
+
+        # Every row carries the full column set, so one executemany covers the
+        # batch and REPLACE cannot drop a column back to its default
+        columns = tuple(rows[0])
+        cols = ", ".join(_quote(c) for c in columns)
+        placeholders = ", ".join("?" * len(columns))
+        verb = "INSERT OR REPLACE" if replace else "INSERT"
+        with self._db._transaction():
+            self._db.executemany(
+                f"{verb} INTO {self._quoted} ({cols}) VALUES ({placeholders})",
+                [tuple(row.values()) for row in rows],
+            )
+            return self._fetch_by_ids([row["id"] for row in rows])
+
     def drop(self) -> None:
         """Drop the table from the database."""
         self._db.execute(f"DROP TABLE IF EXISTS {self._quoted}")
-        # Evict so the next db(cls) recreates the table
+        # Evict so the next db(cls) recreates the table, and so a db-wide
+        # dump() does not resurrect it as an empty one
         self._db._tables.pop(self._cls, None)
+        self._db._models.pop(self._table, None)
 
 
 class SQL:
@@ -725,6 +1183,12 @@ class SQL:
 
     Args:
         path: Path to SQLite database file. Use ":memory:" for in-memory DB.
+        synchronous: Durability level, keyword-only. Defaults to "NORMAL",
+            which skips an fsync per commit; pass "FULL" to survive an OS
+            crash or power loss. Lowercase is accepted. See Synchronous.
+
+    Raises:
+        ValueError: If synchronous is not a recognized level.
 
     Example:
         >>> db = SQL("app.db")
@@ -733,10 +1197,12 @@ class SQL:
         ...     name: str = ""
         >>> users = db(User)
         >>> users.create(name="Alice")
+        >>> durable = SQL("outbox.db", synchronous="FULL")
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, synchronous: Synchronous = "NORMAL"):
         self.path = path
+        self.synchronous = _sync_level(synchronous)
         # Reentrant: _transaction holds the lock across nested execute calls
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
@@ -744,6 +1210,17 @@ class SQL:
         # Weak values: a Table holds its SQL, so a strong cache would create a
         # reference cycle and delay closing the connection to the cyclic GC.
         self._tables: MutableMapping[type, Any] = weakref.WeakValueDictionary()
+        # The dataclasses seen so far, by table name. Held strongly, unlike the
+        # tables themselves: dump() and load() have to know what a database
+        # contains even when the caller kept no Table around.
+        self._models: dict[str, type[Any]] = {}
+
+    def __del__(self) -> None:
+        # Release the file handle as soon as the instance is collected, so the
+        # database file can be removed without an explicit close().
+        conn = getattr(self, "_conn", None)
+        if conn is not None:
+            conn.close()
 
     def _connect(self) -> sqlite3.Connection:
         """Open the connection on first use and apply pragmas.
@@ -754,11 +1231,13 @@ class SQL:
         if self._conn is None:
             conn = sqlite3.connect(self.path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
-            # WAL lets readers run concurrently with a writer; NORMAL trades an
-            # fsync per commit for durability only against OS/power loss, not
-            # against process crashes. Both are no-ops for ":memory:".
+            # WAL lets readers run concurrently with a writer. At the default
+            # synchronous=NORMAL a commit is durable against a process crash,
+            # but the most recent commits can roll back on an OS crash or power
+            # loss; synchronous="FULL" fsyncs each commit to close that window.
+            # Neither pragma applies to ":memory:".
             conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute(f"PRAGMA synchronous = {self.synchronous}")
             self._conn = conn
         return self._conn
 
@@ -823,6 +1302,112 @@ class SQL:
             if self._depth == 0:
                 conn.commit()
 
+    # path comes first to match Table.dump() and load(); the models follow it
+    def dump(  # pylint: disable=keyword-arg-before-vararg
+        self,
+        path: str | os.PathLike[str] | None = None,
+        *models: type[Any],
+        include_deleted: bool = True,
+        indent: int | None = 2,
+    ) -> list[dict[str, Any]]:
+        """Serialize whole tables to one fixture file.
+
+        Args:
+            path: Where to write the JSON file. Pass None to only return the
+                records; it is the first argument, so selecting models without
+                writing a file reads ``db.dump(None, User)``.
+            *models: Dataclasses to dump, in order. With none given, every
+                table this instance has opened is dumped, in the order they
+                were first used.
+            include_deleted: If False, leave soft-deleted rows out.
+            indent: Indentation for the file; None writes it on one line.
+
+        Returns:
+            The records of every dumped table, tagged with their model name.
+
+        Raises:
+            TypeError: If path is not a path, which usually means a model was
+                passed in its place.
+
+        Example:
+            >>> db.dump("fixtures/seed.json", User, Post)
+            >>> db.dump("fixtures/all.json")   # every table db() has opened
+            >>> records = db.dump(None, User)  # no file
+        """
+        if path is not None and not isinstance(path, (str, os.PathLike)):
+            raise TypeError(
+                f"dump() path must be a path or None, got {type(path)}; "
+                "models go after it"
+            )
+        chosen = list(models) or list(self._models.values())
+        tables = [self(model) for model in chosen]
+        records = [
+            record
+            for table in tables
+            for record in table.dump(include_deleted=include_deleted)
+        ]
+        if path is not None:
+            _write_fixtures(path, records, indent)
+        return records
+
+    def load(
+        self, source: Fixtures, *models: type[Any], replace: bool = True
+    ) -> dict[str, list[Any]]:
+        """Load a fixture file across tables.
+
+        Records are routed to a table by their ``"model"`` name and loaded in
+        one transaction, so a fixture that fails partway leaves the database
+        untouched. See ``Table.load`` for what happens to each record.
+
+        Args:
+            source: Path to a JSON fixture file, or the records themselves.
+            *models: Dataclasses the fixture refers to. Models this instance
+                has already opened a table for are found without being listed.
+            replace: If True, a record whose id already exists overwrites that
+                row. If False, it raises ``sqlite3.IntegrityError`` instead.
+
+        Returns:
+            The loaded records, read back from their tables, keyed by model
+            name.
+
+        Raises:
+            KeyError: If a record names a model with no matching table.
+            TypeError: If a record has no ``"model"`` name.
+
+        Example:
+            >>> db.load("fixtures/seed.json", User, Post)
+            >>> db.load(db.dump())   # round trip
+        """
+        records = _read_fixtures(source)
+        for model in models:
+            self(model)
+
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            model_name = record.get("model")
+            if not isinstance(model_name, str):
+                raise TypeError(
+                    'Fixture record has no "model" name; load a file of bare '
+                    "field dicts into a single table with Table.load() instead"
+                )
+            groups.setdefault(model_name, []).append(record)
+
+        # Resolved before the transaction opens: an unknown model should fail
+        # without writing anything, and opening a table is DDL that a rollback
+        # would undo behind the cache's back
+        tables = []
+        for name in groups:
+            cls = self._models.get(name)
+            if cls is None:
+                raise KeyError(f"Unknown model: {name}. Pass its dataclass to load().")
+            tables.append((name, self(cls)))
+
+        loaded: dict[str, list[Any]] = {}
+        with self._transaction():
+            for name, table in tables:
+                loaded[name] = table.load(groups[name], replace=replace)
+        return loaded
+
     def close(self) -> None:
         """Close the connection. An in-memory database is discarded."""
         with self._lock:
@@ -846,6 +1431,7 @@ class SQL:
         table = self._tables.get(cls)
         if table is None:
             table = self._tables[cls] = Table(self, cls)
+            self._models[_table_name(cls)] = cls
         return table
 
     def __enter__(self) -> Self:
@@ -853,10 +1439,3 @@ class SQL:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
-
-    def __del__(self) -> None:
-        # Release the file handle as soon as the instance is collected, so the
-        # database file can be removed without an explicit close().
-        conn = getattr(self, "_conn", None)
-        if conn is not None:
-            conn.close()
